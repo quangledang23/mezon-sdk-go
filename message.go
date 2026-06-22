@@ -1,150 +1,165 @@
-package mezonlightsdk
+package mezon
 
 import (
 	"encoding/json"
-	"strings"
 
-	"github.com/quangledang23/mezon-sdk-go/proto"
+	"github.com/quangledang23/mezon-sdk-go/api"
+	"github.com/quangledang23/mezon-sdk-go/rtapi"
 )
 
-// ChannelMessage is a message received on a channel, with content, mentions
-// and attachments already decoded (the wire-level counterpart is
-// proto.ChannelMessage).
-type ChannelMessage struct {
-	ID                string                  `json:"id"`
-	Avatar            string                  `json:"avatar,omitempty"`
-	ChannelID         string                  `json:"channel_id"`
-	ChannelLabel      string                  `json:"channel_label"`
-	ClanID            string                  `json:"clan_id,omitempty"`
-	Code              int32                   `json:"code"`
-	Content           any                     `json:"content"`
-	Mentions          []*ApiMessageMention    `json:"mentions,omitempty"`
-	Attachments       []*ApiMessageAttachment `json:"attachments,omitempty"`
-	SenderID          string                  `json:"sender_id"`
-	ClanLogo          string                  `json:"clan_logo,omitempty"`
-	CategoryName      string                  `json:"category_name,omitempty"`
-	Username          string                  `json:"username,omitempty"`
-	ClanNick          string                  `json:"clan_nick,omitempty"`
-	ClanAvatar        string                  `json:"clan_avatar,omitempty"`
-	DisplayName       string                  `json:"display_name,omitempty"`
-	CreateTimeSeconds uint32                  `json:"create_time_seconds,omitempty"`
-	UpdateTimeSeconds uint32                  `json:"update_time_seconds,omitempty"`
-	Mode              int32                   `json:"mode,omitempty"`
-	MessageID         string                  `json:"message_id,omitempty"`
-	HideEditted       bool                    `json:"hide_editted,omitempty"`
-	IsPublic          bool                    `json:"is_public,omitempty"`
-	TopicID           string                  `json:"topic_id,omitempty"`
+// Message is a cached chat message with reply/edit/react/delete actions, port
+// of src/mezon-client/structures/Message.ts.
+type Message struct {
+	ID                string
+	SenderID          string
+	Content           json.RawMessage
+	Mentions          []Mention
+	Attachments       []Attachment
+	References        []MessageRef
+	Reactions         []Reaction
+	TopicID           string
+	CreateTimeSeconds uint32
+	Channel           *TextChannel
+
+	socket *DefaultSocket
+	queue  *AsyncThrottleQueue
 }
 
-// newChannelMessageFromProto mirrors createChannelMessageFromEvent in the
-// TypeScript SDK: it decodes content (JSON) plus mentions and attachments
-// (JSON or protobuf list messages).
-func newChannelMessageFromProto(pm *proto.ChannelMessage) *ChannelMessage {
-	return &ChannelMessage{
-		ID:                pm.MessageID,
-		Avatar:            pm.Avatar,
-		ChannelID:         pm.ChannelID,
-		ChannelLabel:      pm.ChannelLabel,
-		ClanID:            pm.ClanID,
-		Code:              pm.Code,
-		Content:           SafeJSONParse([]byte(pm.Content)),
-		Mentions:          DecodeMentions(pm.Mentions),
-		Attachments:       DecodeAttachments(pm.Attachments),
-		SenderID:          pm.SenderID,
-		ClanLogo:          pm.ClanLogo,
-		CategoryName:      pm.CategoryName,
-		Username:          pm.Username,
-		ClanNick:          pm.ClanNick,
-		ClanAvatar:        pm.ClanAvatar,
-		DisplayName:       pm.DisplayName,
-		CreateTimeSeconds: pm.CreateTimeSeconds,
-		UpdateTimeSeconds: pm.UpdateTimeSeconds,
-		Mode:              pm.Mode,
-		MessageID:         pm.MessageID,
-		HideEditted:       pm.HideEditted,
-		IsPublic:          pm.IsPublic,
-		TopicID:           pm.TopicID,
+func newMessageFromChannelMessage(cm *ChannelMessage, channel *TextChannel, socket *DefaultSocket, queue *AsyncThrottleQueue) *Message {
+	return &Message{
+		ID:                cm.MessageID,
+		SenderID:          cm.SenderID,
+		Content:           cm.Content,
+		Mentions:          cm.Mentions,
+		Attachments:       cm.Attachments,
+		References:        cm.References,
+		Reactions:         cm.Reactions,
+		TopicID:           cm.TopicID,
+		CreateTimeSeconds: cm.CreateTimeSeconds,
+		Channel:           channel,
+		socket:            socket,
+		queue:             queue,
 	}
 }
 
-// SafeJSONParse decodes raw JSON content. On failure (or for empty input) it
-// returns map[string]any{"t": <raw string>}, mirroring safeJSONParse in the
-// TypeScript SDK.
-func SafeJSONParse(raw []byte) any {
-	s := string(raw)
-	if s == "" || s == "[]" {
-		return map[string]any{"t": s}
-	}
-
-	var out any
-	if err := json.Unmarshal(raw, &out); err == nil {
-		return out
-	}
-
-	// Retry with bare newlines escaped, as some payloads contain raw control
-	// characters inside string literals.
-	fixed := strings.NewReplacer("\n", "\\n", "\r", "\\r").Replace(s)
-	if err := json.Unmarshal([]byte(fixed), &out); err == nil {
-		return out
-	}
-
-	return map[string]any{"t": s}
+func (m *Message) mode() int {
+	return int(ConvertChannelTypeToChannelMode(m.Channel.ChannelType))
 }
 
-// DecodeAttachments decodes a channel message attachments payload, which may
-// be either JSON or a protobuf-encoded MessageAttachmentList.
-func DecodeAttachments(data []byte) []*proto.MessageAttachment {
-	if len(data) == 0 {
-		return nil
+// Reply replies to this message, port of Message.reply. opts may be nil.
+func (m *Message) Reply(content Content, opts *SendOptions) (*rtapi.ChannelMessageAck, error) {
+	if opts == nil {
+		opts = &SendOptions{}
 	}
-
-	// '[' (JSON array) or '{' (JSON object) marks a JSON payload.
-	if data[0] == '[' || data[0] == '{' {
-		var list []*proto.MessageAttachment
-		if err := json.Unmarshal(data, &list); err == nil {
-			return list
+	return Enqueue(m.queue, func() (*rtapi.ChannelMessageAck, error) {
+		var senderUsername, senderAvatar string
+		if client := m.Channel.Clan.client; client != nil {
+			if user, err := client.Users.Fetch(m.SenderID); err == nil && user != nil {
+				senderUsername = firstNonEmpty(user.ClanNick, user.DisplayName, user.Username)
+				senderAvatar = firstNonEmpty(user.ClanAvatar, user.Avatar)
+			}
 		}
-		var wrapper struct {
-			Attachments []*proto.MessageAttachment `json:"attachments"`
+		refs := []MessageRef{{
+			MessageRefID:          m.ID,
+			MessageSenderID:       m.SenderID,
+			MessageSenderUsername: senderUsername,
+			MessageSenderAvatar:   senderAvatar,
+			Content:               string(m.Content),
+		}}
+		topic := opts.TopicID
+		if topic == "" {
+			topic = m.TopicID
 		}
-		if err := json.Unmarshal(data, &wrapper); err == nil {
-			return wrapper.Attachments
+		data := ReplyMessageData{
+			ClanID:           m.Channel.Clan.ID,
+			ChannelID:        m.Channel.ID,
+			Mode:             m.mode(),
+			IsPublic:         !m.Channel.IsPrivate,
+			Content:          content,
+			Mentions:         opts.Mentions,
+			Attachments:      opts.Attachments,
+			References:       refs,
+			AnonymousMessage: opts.Anonymous,
+			MentionEveryone:  opts.MentionEveryone,
+			Code:             opts.Code,
+			TopicID:          topic,
 		}
-		return nil
-	}
-
-	list := &proto.MessageAttachmentList{}
-	if err := list.Unmarshal(data); err == nil {
-		return list.Attachments
-	}
-	return nil
+		return m.socket.WriteChatMessage(data)
+	})
 }
 
-// DecodeMentions decodes a channel message mentions payload, which may be
-// either JSON or a protobuf-encoded MessageMentionList.
-func DecodeMentions(data []byte) []*proto.MessageMention {
-	if len(data) == 0 {
-		return nil
-	}
+// Update edits this message, port of Message.update.
+func (m *Message) Update(content Content, mentions []Mention, attachments []Attachment) (*rtapi.ChannelMessageAck, error) {
+	return Enqueue(m.queue, func() (*rtapi.ChannelMessageAck, error) {
+		topic := m.TopicID
+		if topic == "" {
+			topic = "0"
+		}
+		data := UpdateMessageData{
+			ClanID:            m.Channel.Clan.ID,
+			ChannelID:         m.Channel.ID,
+			Mode:              m.mode(),
+			IsPublic:          !m.Channel.IsPrivate,
+			MessageID:         m.ID,
+			Content:           content,
+			Mentions:          mentions,
+			Attachments:       attachments,
+			CreateTimeSeconds: m.CreateTimeSeconds,
+			TopicID:           topic,
+			IsUpdateMsgTopic:  m.TopicID != "",
+		}
+		return m.socket.UpdateChatMessage(data)
+	})
+}
 
-	// '[' (JSON array) or '{' (JSON object) marks a JSON payload.
-	if data[0] == '[' || data[0] == '{' {
-		var list []*proto.MessageMention
-		if err := json.Unmarshal(data, &list); err == nil {
-			return list
+// React adds or removes a reaction, port of Message.react.
+func (m *Message) React(p ReactPayload) (*api.MessageReaction, error) {
+	return Enqueue(m.queue, func() (*api.MessageReaction, error) {
+		emojiID := p.EmojiID
+		if emojiID == "" {
+			emojiID = "0"
 		}
-		var wrapper struct {
-			Mentions []*proto.MessageMention `json:"mentions"`
+		data := ReactMessageData{
+			ID:              p.ID,
+			ClanID:          m.Channel.Clan.ID,
+			ChannelID:       m.Channel.ID,
+			Mode:            m.mode(),
+			IsPublic:        !m.Channel.IsPrivate,
+			MessageID:       m.ID,
+			EmojiID:         emojiID,
+			Emoji:           p.Emoji,
+			Count:           p.Count,
+			MessageSenderID: m.SenderID,
+			ActionDelete:    p.ActionDelete,
 		}
-		if err := json.Unmarshal(data, &wrapper); err == nil {
-			return wrapper.Mentions
-		}
-		return nil
-	}
+		return m.socket.WriteMessageReaction(data)
+	})
+}
 
-	list := &proto.MessageMentionList{}
-	if err := list.Unmarshal(data); err == nil {
-		return list.Mentions
+// Delete removes this message, port of Message.delete.
+func (m *Message) Delete() (*rtapi.ChannelMessageAck, error) {
+	return Enqueue(m.queue, func() (*rtapi.ChannelMessageAck, error) {
+		topic := m.TopicID
+		if topic == "" {
+			topic = "0"
+		}
+		data := RemoveMessageData{
+			ClanID:    m.Channel.Clan.ID,
+			ChannelID: m.Channel.ID,
+			Mode:      m.mode(),
+			IsPublic:  !m.Channel.IsPrivate,
+			MessageID: m.ID,
+			TopicID:   topic,
+		}
+		return m.socket.RemoveChatMessage(data)
+	})
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
 	}
-	return nil
+	return ""
 }

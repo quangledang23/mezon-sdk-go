@@ -1,234 +1,104 @@
-# Mezon SDK for Go
+# mezon-go
 
-A lightweight Go SDK for [Mezon](https://mezon.ai) chat, ported from the
-TypeScript package [`mezon-sdk`](../mezon-sdk) (in `mezonai/mezon-js`). It
-mirrors the [`mezon-light-sdk-go`](https://github.com/quangledang23/mezon-light-sdk-go)
-reference: methods take a `context.Context` and return errors, optional
-parameters live in option structs, snowflake IDs are kept as decimal strings,
-and message-content offsets are UTF-16 code units (JavaScript string indices,
-so an emoji like 🎉 counts as 2) — matching how the Mezon clients index text.
-
-## Features
-
-- Authenticate as a bot with a bot ID + API key, with an ID token, or
-  restore a session from stored tokens
-- Refresh sessions (single-flight; concurrent callers share one refresh)
-- Create DM / group DM channels
-- Upload attachments
-- Realtime messaging over WebSocket using the protobuf wire protocol
-  (join/leave channels, send/receive messages, heartbeat with automatic
-  dead-connection detection)
-- Rich message content: clickable links (auto-detected or explicit),
-  code/bold markup, user/role/`@here` mentions, channel hashtags and
-  custom emojis via `ContentBuilder` — text offsets handled for you
-- Incoming messages arrive with content, mentions and attachments decoded
-
-## Installation
-
-```sh
-go get github.com/quangledang23/mezon-sdk-go
-```
-
-## Quick start
+A Go port of the [mezon-sdk](../mezon-sdk) TypeScript client for the Mezon
+server. It speaks the same protobuf-over-WebSocket realtime protocol and the same
+protobuf REST API, so a Go bot behaves like a JS bot.
 
 ```go
-package main
-
-import (
-	"context"
-	"log"
-
-	"github.com/quangledang23/mezon-sdk-go"
-)
-
-func main() {
-	ctx := context.Background()
-
-	// Authenticate as a bot with credentials from the Mezon developer portal…
-	client, err := mezonlightsdk.AuthenticateBot(ctx, mezonlightsdk.AuthenticateBotConfig{
-		BotID:  "your-bot-id",
-		APIKey: "your-bot-token",
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// …or with an ID token from an identity provider:
-	// client, err := mezonlightsdk.Authenticate(ctx, mezonlightsdk.AuthenticateConfig{
-	// 	IDToken:  "id-token-from-provider",
-	// 	UserID:   "user-123",
-	// 	Username: "johndoe",
-	// })
-
-	// …or restore from previously stored tokens:
-	// client, err := mezonlightsdk.InitClient(mezonlightsdk.ClientInitConfig{
-	// 	Token:        "your-token",
-	// 	RefreshToken: "your-refresh-token",
-	// 	APIURL:       "https://api.mezon.ai",
-	// 	WSURL:        "gw.mezon.ai",
-	// 	UserID:       "user-123",
-	// })
-
-	// Create a DM channel.
-	channel, err := client.CreateDM(ctx, "peer-user-id")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Connect the realtime socket.
-	socket := mezonlightsdk.NewLightSocket(client, client.Session())
-	err = socket.Connect(ctx, mezonlightsdk.SocketConnectOptions{
-		OnError:      func(err error) { log.Println("socket error:", err) },
-		OnDisconnect: func() { log.Println("disconnected") },
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer socket.Disconnect()
-
-	// Receive messages. The returned function unsubscribes the handler.
-	unsubscribe := socket.OnChannelMessage(func(msg *mezonlightsdk.ChannelMessage) {
-		log.Printf("received from %s: %v", msg.Username, msg.Content)
-	})
-	defer unsubscribe()
-
-	// Join the DM channel and send a message.
-	if err := socket.JoinDMChannel(ctx, channel.ChannelID); err != nil {
-		log.Fatal(err)
-	}
-	// URLs in plain text become clickable links automatically
-	// (set HideLink: true to keep them plain).
-	err = socket.SendDM(ctx, mezonlightsdk.SendMessagePayload{
-		ChannelID: channel.ChannelID,
-		Content:   "Hello! Docs: https://mezon.ai/docs/developer",
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	select {} // keep the process alive to receive messages
-}
+import mezon "github.com/quangledang23/mezon-sdk-go"
 ```
 
-### Sending to a clan channel
-
-`LightSocket` covers DMs and group DMs. For clan channels, use the underlying
-`DefaultSocket` directly:
+## Getting started
 
 ```go
-sock, _ := socket.Socket()
+client, err := mezon.NewMezonClient(mezon.ClientConfig{
+    BotID: os.Getenv("MEZON_BOT_ID"),
+    Token: os.Getenv("MEZON_BOT_TOKEN"),
+})
+if err != nil { log.Fatal(err) }
 
-// Channel type 1 = text channel; mode 2 = clan channel message.
-_, err = sock.JoinChat(ctx, clanID, channelID, 1, true)
-ack, err := sock.WriteChatMessage(ctx, clanID, channelID, 2, true,
-	mezonlightsdk.NewTextContent("Hello clan! https://mezon.ai"), nil)
+client.OnChannelMessage(func(m *mezon.ChannelMessage) {
+    if m.ContentText() == "ping" {
+        ch, _ := client.Channels.Fetch(m.ChannelID)
+        ch.Send(mezon.Text("pong"), nil)
+    }
+})
+
+if err := client.Login(); err != nil { log.Fatal(err) }
+select {} // the SDK runs its read/heartbeat loops in goroutines
 ```
 
-### Rich content: links, markup, mentions, hashtags, emojis
+A complete bot is in [`example/`](./example).
 
-Mezon messages carry plain text (`t`) plus position-based tokens: `mk`
-(markup: links, code, bold), `hg` (channel hashtags) and `ej` (custom
-emojis) inside the content, and a `mentions` array next to it. All offsets
-are UTF-16 code units (JavaScript string indices, as the Mezon clients
-count them — an emoji like 🎉 counts as 2). `ContentBuilder` assembles them
-so you never count offsets by hand:
+## What `Login` does
 
-```go
-b := mezonlightsdk.NewContentBuilder()
-b.Text("Deploy xong ").
-	MentionHere().              // "@here", notifies the channel (blue mention)
-	Text(", chi tiết: ").
-	Link("https://ci.example.com").
-	Text(" tại ").
-	Hashtag(channelID, "#deploys").
-	Text(" — ").
-	Bold("quan trọng")
+Mirrors `MezonClientCore.login`:
 
-ack, err := sock.WriteChatMessage(ctx, clanID, channelID, 2, true,
-	b.Content(), &mezonlightsdk.ChatMessageOptions{
-		Mentions:        b.Mentions(),
-		MentionEveryone: true, // makes @here actually notify everyone
-	})
-```
+1. Authenticate the bot over REST (`POST /v2/apps/authenticate/token`, JSON body,
+   protobuf `Session` response).
+2. Decode the JWT for expiry/vars, and re-target host/ws from the session's
+   `api_url`/`ws_url`.
+3. Open the protobuf WebSocket (`/ws?...&format=protobuf`), then join every clan
+   chat and build the clan/channel/user caches.
 
-Also available: `MentionUser(userID, "@alice")`, `MentionRole(roleID,
-"@admins")` (renders green), `Code("...")`, `Emoji(emojiID, ":smile:")`,
-`Markup(markupType, text)` for the remaining `mk` types (`MarkupTypePre`,
-`MarkupTypeTriple`, `MarkupTypeSingle`, `MarkupTypeCode`,
-`MarkupTypeVoiceLink`), and inline images (webhook-style `images` field,
-e.g. with a URL from `UploadAttachment`):
+## Sending messages and UTF-16
+
+> **Message offsets are UTF-16 code units.** The Mezon web/JS clients are
+> JavaScript, so message-content length and mention `s`/`e` (start/end) offsets
+> are measured in UTF-16 code units, not bytes or runes. This port does the
+> same:
+>
+> - The 8000-character content limit is checked with `UTF16Len(JSON(content))`,
+>   exactly matching the JS `JSON.stringify(content).length` guard.
+> - Use `mezon.MentionSpan(text, substr)` to compute a mention's `S`/`E` so a
+>   leading emoji or CJK text shifts the offset by the right amount.
 
 ```go
-b.Image(&mezonlightsdk.MessageImage{
-	Filename: "dog.jpg",
-	URL:      "https://cdn.mezon.vn/.../dog.jpg",
-	Filetype: "image/jpeg",
-	Width:    275,
-	Height:   183,
+reply := "👋 @bob welcome!"
+s, e, _ := mezon.MentionSpan(reply, "@bob") // s=3, e=7 (the emoji is 2 units)
+ch.Send(mezon.Text(reply), &mezon.SendOptions{
+    Mentions: []mezon.Mention{{UserID: senderID, Username: "bob", S: s, E: e}},
 })
 ```
 
-Note on `@here`: clients render a mention as a blue user mention only when
-its `user_id` is the sentinel `mezonlightsdk.MentionHereUserID`
-(`"1775731111020111321"`, hardcoded in the official clients); a mention
-without a user ID falls into the role-mention path and renders green.
-`MentionHere()` handles this for you.
+Helpers: `UTF16Len`, `UTF16Encode`, `RuneIndexToUTF16`, `MentionSpan`.
 
-### Receiving messages
+## Message actions
 
-Incoming messages arrive decoded: `Content` is the parsed content JSON,
-`Mentions` and `Attachments` are typed slices (the server sends them as
-protobuf or JSON; both are handled):
+`TextChannel.Send` / `SendEphemeral`, and on a cached `Message`:
+`Reply`, `Update`, `React`, `Delete`. `User.SendDM` sends a direct message.
+All writes are serialized through an `AsyncThrottleQueue` (80/sec, like the TS SDK).
 
-```go
-socket.OnChannelMessage(func(msg *mezonlightsdk.ChannelMessage) {
-	content, _ := msg.Content.(map[string]any)
-	text, _ := content["t"].(string)
-	log.Printf("%s: %s (mentions: %d)", msg.Username, text, len(msg.Mentions))
-})
+## Events
+
+Register with `client.On(mezon.Event<Name>, handler)` or the typed
+`client.OnChannelMessage`. `channel_message` delivers a friendly
+`*mezon.ChannelMessage` (content/mentions/reactions parsed); other events deliver
+the decoded protobuf message pointer from the `rtapi`/`api` packages.
+
+## Protobuf code generation
+
+`api/*.pb.go` and `rtapi/*.pb.go` are generated, not hand-written. The `.proto`
+files under `proto/` are reconstructed from the ts-proto output in the TS SDK by
+`tools/tsproto2proto.js`, then compiled with `protoc`:
+
+```bash
+node tools/tsproto2proto.js
+protoc -I proto -I <wkt-include> --go_out=. --go_opt=paths=source_relative \
+    proto/api/api.proto proto/rtapi/realtime.proto
 ```
 
-### Uploading attachments
+Re-run both steps after the TS SDK's protobuf changes.
 
-```go
-result, err := client.UploadAttachment(ctx, &mezonlightsdk.ApiUploadAttachmentRequest{
-	Filename: "image.png",
-	Filetype: "image/png",
-	Size:     1024,
-	Width:    800,
-	Height:   600,
-})
-// result.URL can be used in message attachments.
-```
+## Not yet ported
 
-### Session management
+These depend on external packages outside this repo and are intentionally left
+out of the first port:
 
-```go
-// Refresh before the token expires.
-if client.IsSessionExpired() {
-	if _, err := client.RefreshSession(ctx); err != nil {
-		log.Fatal(err)
-	}
-}
-
-// Persist the session for later restoration via InitClient.
-config := client.ExportSession()
-```
-
-## Package layout
-
-| Path        | Contents                                                            |
-| ----------- | ------------------------------------------------------------------- |
-| `.` (root)  | `LightClient`, `LightSocket`, `DefaultSocket`, `MezonApi`, `Session`; `content.go` (outgoing content: `ContentBuilder`, markup/hashtag/emoji/image tokens, link extraction), `message.go` (incoming `ChannelMessage` decoding) |
-| `proto`     | Hand-written protobuf wire codecs for the `mezon.api` and `mezon.realtime` messages used by the SDK (field numbers mirror the ts-proto generated code in `mezon-light-sdk/src/proto`) |
-
-## Differences from the TypeScript SDK
-
-- Methods take a `context.Context` and return `error` instead of promises.
-- `WriteChatMessage` collects its many optional parameters in
-  `ChatMessageOptions`.
-- Callbacks (`OnChannelMessage`, `OnDisconnect`, …) are struct fields set
-  before `Connect`.
-- Snowflake IDs remain `string` in Go structs and are converted to/from
-  int64 varints on the wire, matching ts-proto's int64-as-string behavior
-  (an ID of `"0"` or `""` is omitted from the wire).
+- **Token transfers / ZK proofs (MMN)** — the TS SDK uses the external
+  `mmn-client-js` library (`MmnClient`, `ZkClient`) for `sendToken`,
+  `getZkProofs`, ephemeral keypairs and nonces. Porting requires a Go port of
+  that crypto library.
+- **AI-agent SSE stream** — the `EventSourceManager` / agent session events.
+- **Local SQLite message persistence** (`MessageDatabase`); messages are cached
+  in memory only.

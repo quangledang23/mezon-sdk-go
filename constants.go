@@ -1,55 +1,91 @@
-// Package mezonlightsdk is a lightweight Go SDK for Mezon chat, ported from the
-// TypeScript package mezon-sdk (packages/mezon-sdk in mezonai/mezon-js),
-// following the design of the mezon-light-sdk-go reference: methods take a
-// context.Context and return errors, optional parameters live in option
-// structs, snowflake IDs are kept as decimal strings, and every
-// message-content offset is a UTF-16 code unit (JavaScript string index) so
-// it lines up with how the Mezon clients count them.
-package mezonlightsdk
+package mezon
 
-import "time"
+// ChannelType mirrors src/constants/enum.ts ChannelType.
+type ChannelType int
 
 const (
-	// MezonGWURL is the default Mezon Gateway URL.
-	MezonGWURL = "https://gw.mezon.ai"
+	ChannelTypeChannel      ChannelType = 1
+	ChannelTypeGroup        ChannelType = 2
+	ChannelTypeDM           ChannelType = 3
+	ChannelTypeGmeetVoice   ChannelType = 4
+	ChannelTypeForum        ChannelType = 5
+	ChannelTypeStreaming    ChannelType = 6
+	ChannelTypeThread       ChannelType = 7
+	ChannelTypeApp          ChannelType = 8
+	ChannelTypeAnnouncement ChannelType = 9
+	ChannelTypeMezonVoice   ChannelType = 10
+)
 
-	// MezonWSHost is the default WebSocket host, used when authentication
-	// does not return a user-specific one.
-	MezonWSHost = "gw.mezon.ai"
+// ChannelStreamMode mirrors src/constants/enum.ts ChannelStreamMode.
+type ChannelStreamMode int
 
-	// SocketReadyMaxRetry is the maximum number of retries when waiting for
-	// the socket to be ready.
-	SocketReadyMaxRetry = 20
+const (
+	StreamModeChannel ChannelStreamMode = 2
+	StreamModeGroup   ChannelStreamMode = 3
+	StreamModeDM      ChannelStreamMode = 4
+	StreamModeClan    ChannelStreamMode = 5
+	StreamModeThread  ChannelStreamMode = 6
+)
 
-	// SocketReadyRetryDelay is the initial delay between socket ready
-	// retries (uses exponential backoff).
-	SocketReadyRetryDelay = 100 * time.Millisecond
+// TypeMessage mirrors src/constants/enum.ts TypeMessage (the message "code").
+type TypeMessage int
 
-	// ClanDM is the clan ID used for Direct Messages.
-	ClanDM = "0"
+const (
+	TypeMessageChat               TypeMessage = 0
+	TypeMessageChatUpdate         TypeMessage = 1
+	TypeMessageChatRemove         TypeMessage = 2
+	TypeMessageTyping             TypeMessage = 3
+	TypeMessageIndicator          TypeMessage = 4
+	TypeMessageWelcome            TypeMessage = 5
+	TypeMessageCreateThread       TypeMessage = 6
+	TypeMessageCreatePin          TypeMessage = 7
+	TypeMessageMessageBuzz        TypeMessage = 8
+	TypeMessageTopic              TypeMessage = 9
+	TypeMessageAuditLog           TypeMessage = 10
+	TypeMessageSendToken          TypeMessage = 11
+	TypeMessageEphemeral          TypeMessage = 12
+	TypeMessageUpcomingEvent      TypeMessage = 13
+	TypeMessageUpdateEphemeralMsg TypeMessage = 14
+	TypeMessageDeleteEphemeralMsg TypeMessage = 15
+	TypeMessageContact            TypeMessage = 16
+	TypeMessageLocation           TypeMessage = 17
+	TypeMessagePoll               TypeMessage = 18
+)
 
-	// ChannelTypeDM is the channel type for Direct Messages.
-	ChannelTypeDM = 3
-
-	// ChannelTypeGroup is the channel type for group DMs.
-	ChannelTypeGroup = 2
-
-	// StreamModeDM is the stream mode for Direct Messages.
-	StreamModeDM = 4
-
-	// StreamModeGroup is the stream mode for group DMs.
-	StreamModeGroup = 3
-
-	// DefaultServerKey is the default server key if none is provided.
-	DefaultServerKey = "DefaultServerKey"
-
-	// MentionHereUserID is the sentinel user ID the official clients put in a
-	// mention's user_id for "@here" (ID_MENTION_HERE in the Mezon web app).
-	// Without it the clients render the mention as a role mention (green)
-	// instead of a user mention (blue).
-	MentionHereUserID = "1775731111020111321"
-
-	// MentionHereTitle is the literal mention text that must appear in the
-	// message content at the mention's s/e offsets.
-	MentionHereTitle = "@here"
+// Event names. These are the string keys emitted by the client, matching the
+// Events / InternalEventsSocket enums in src/constants/enum.ts. Register a
+// handler with MezonClient.On(<Event>, handler).
+const (
+	EventChannelMessage      = "channel_message"
+	EventMessageReaction     = "message_reaction_event"
+	EventUserChannelRemoved  = "user_channel_removed_event"
+	EventUserClanRemoved     = "user_clan_removed_event"
+	EventUserChannelAdded    = "user_channel_added_event"
+	EventChannelCreated      = "channel_created_event"
+	EventChannelDeleted      = "channel_deleted_event"
+	EventChannelUpdated      = "channel_updated_event"
+	EventChannelArchive      = "channel_archive_event"
+	EventRole                = "role_event"
+	EventGiveCoffee          = "give_coffee_event"
+	EventRoleAssign          = "role_assign_event"
+	EventAddClanUser         = "add_clan_user_event"
+	EventTokenSend           = "token_sent_event"
+	EventClanEventCreated    = "clan_event_created"
+	EventMessageButtonClick  = "message_button_clicked"
+	EventStreamingJoined     = "streaming_joined_event"
+	EventStreamingLeaved     = "streaming_leaved_event"
+	EventDropdownBoxSelected = "dropdown_box_selected"
+	EventWebrtcSignalingFwd  = "webrtc_signaling_fwd"
+	EventVoiceStarted        = "voice_started_event"
+	EventVoiceEnded          = "voice_ended_event"
+	EventVoiceJoined         = "voice_joined_event"
+	EventVoiceLeaved         = "voice_leaved_event"
+	EventNotifications       = "notifications"
+	EventQuickMenu           = "quick_menu_event"
+	EventAIAgentEnable       = "aiagent_enabled_event"
+	EventClanUpdated         = "clan_updated_event"
+	EventClanProfileUpdated  = "clan_profile_updated_event"
+	EventUserProfileUpdated  = "user_profile_updated_event"
+	EventClanDeleted         = "clan_deleted_event"
+	EventReady               = "ready"
 )

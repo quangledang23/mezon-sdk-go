@@ -1,0 +1,914 @@
+syntax = "proto3";
+
+package mezon.realtime;
+
+import "google/protobuf/wrappers.proto";
+import "api/api.proto";
+
+option go_package = "github.com/quangledang23/mezon-sdk-go/rtapi;rtapi";
+
+enum Error_Code {
+  RUNTIME_EXCEPTION = 0;
+  UNRECOGNIZED_PAYLOAD = 1;
+  MISSING_PAYLOAD = 2;
+  BAD_INPUT = 3;
+  MATCH_NOT_FOUND = 4;
+  MATCH_JOIN_REJECTED = 5;
+  RUNTIME_FUNCTION_NOT_FOUND = 6;
+  RUNTIME_FUNCTION_EXCEPTION = 7;
+}
+
+message Envelope {
+  int32 cid = 1;
+  Channel channel = 2;
+  ClanJoin clan_join = 3;
+  ChannelJoin channel_join = 4;
+  ChannelLeave channel_leave = 5;
+  .mezon.api.ChannelMessage channel_message = 6;
+  ChannelMessageAck channel_message_ack = 7;
+  ChannelMessageSend channel_message_send = 8;
+  ChannelMessageUpdate channel_message_update = 9;
+  ChannelMessageRemove channel_message_remove = 10;
+  ChannelPresenceEvent channel_presence_event = 11;
+  Error error = 12;
+  Notifications notifications = 13;
+  .mezon.api.Rpc rpc = 14;
+  Status status = 15;
+  StatusFollow status_follow = 16;
+  StatusPresenceEvent status_presence_event = 17;
+  StatusUnfollow status_unfollow = 18;
+  StatusUpdate status_update = 19;
+  StreamData stream_data = 20;
+  StreamPresenceEvent stream_presence_event = 21;
+  Ping ping = 22;
+  Pong pong = 23;
+  MessageTypingEvent message_typing_event = 24;
+  LastSeenMessageEvent last_seen_message_event = 25;
+  .mezon.api.MessageReaction message_reaction_event = 26;
+  VoiceJoinedEvent voice_joined_event = 27;
+  VoiceLeavedEvent voice_leaved_event = 28;
+  VoiceStartedEvent voice_started_event = 29;
+  VoiceEndedEvent voice_ended_event = 30;
+  ChannelCreatedEvent channel_created_event = 31;
+  ChannelDeletedEvent channel_deleted_event = 32;
+  ChannelUpdatedEvent channel_updated_event = 33;
+  LastPinMessageEvent last_pin_message_event = 34;
+  CustomStatusEvent custom_status_event = 35;
+  UserChannelAdded user_channel_added_event = 36;
+  UserChannelRemoved user_channel_removed_event = 37;
+  UserClanRemoved user_clan_removed_event = 38;
+  ClanUpdatedEvent clan_updated_event = 39;
+  ClanProfileUpdatedEvent clan_profile_updated_event = 40;
+  CheckNameExistedEvent check_name_existed_event = 41;
+  UserProfileUpdatedEvent user_profile_updated_event = 42;
+  AddClanUserEvent add_clan_user_event = 43;
+  .mezon.api.CreateEventRequest clan_event_created = 44;
+  RoleAssignedEvent role_assign_event = 45;
+  ClanDeletedEvent clan_deleted_event = 46;
+  .mezon.api.GiveCoffeeEvent give_coffee_event = 47;
+  StickerCreateEvent sticker_create_event = 48;
+  StickerUpdateEvent sticker_update_event = 49;
+  StickerDeleteEvent sticker_delete_event = 50;
+  RoleEvent role_event = 51;
+  EventEmoji event_emoji = 52;
+  StreamingJoinedEvent streaming_joined_event = 53;
+  StreamingLeavedEvent streaming_leaved_event = 54;
+  StreamingStartedEvent streaming_started_event = 55;
+  StreamingEndedEvent streaming_ended_event = 56;
+  PermissionSetEvent permission_set_event = 57;
+  PermissionChangedEvent permission_changed_event = 58;
+  .mezon.api.TokenSentEvent token_sent_event = 59;
+  MessageButtonClicked message_button_clicked = 60;
+  UnmuteEvent unmute_event = 61;
+  WebrtcSignalingFwd webrtc_signaling_fwd = 62;
+  ListActivity list_activity = 63;
+  DropdownBoxSelected dropdown_box_selected = 64;
+  IncomingCallPush incoming_call_push = 65;
+  SdTopicEvent sd_topic_event = 66;
+  FollowEvent follow_event = 67;
+  ChannelAppEvent channel_app_event = 68;
+  UserStatusEvent user_status_event = 69;
+  RemoveFriend remove_friend = 70;
+  .mezon.api.Webhook webhook_event = 71;
+  .mezon.api.NotificationUserChannel noti_user_channel = 72;
+  JoinChannelAppData join_channel_app_data = 73;
+  ChannelCanvas canvas_event = 74;
+  UnpinMessageEvent unpin_message_event = 75;
+  CategoryEvent category_event = 76;
+  HandleParticipantMeetStateEvent handle_participant_meet_state_event = 77;
+  DeleteAccountEvent delete_account_event = 78;
+  EphemeralMessageSend ephemeral_message_send = 79;
+  BlockFriend block_friend = 80;
+  VoiceReactionSend voice_reaction_send = 81;
+  MarkAsRead mark_as_read = 82;
+  ListDataSocket list_data_socket = 83;
+  QuickMenuDataEvent quick_menu_event = 84;
+  UnblockFriend un_block_friend = 85;
+  MeetParticipantEvent meet_participant_event = 86;
+  TransferOwnershipEvent transfer_ownership_event = 87;
+  AddFriend add_friend = 88;
+  BannedUserEvent ban_user_event = 89;
+  ActiveArchivedThread active_archived_thread = 90;
+  AllowAnonymousEvent allow_anonymous_event = 91;
+  ApiRequestEvent api_request_event = 92;
+  ClanCreatedEvent clan_created_event = 93;
+  AIAgentEnabledEvent aiagent_enabled_event = 94;
+  ListChannelUsersBannedEvent list_channel_users_banned_event = 95;
+  .mezon.api.Session refresh_session_event = 96;
+}
+
+message ApiRequestEvent {
+  int32 api_index = 1;
+  string api_name = 2;
+  bytes body = 3;
+}
+
+message FollowEvent {
+}
+
+message BannedUserEvent {
+  repeated int64 user_ids = 1;
+  int32 action = 2;
+  int64 banner_id = 3;
+  int64 channel_id = 4;
+  int64 clan_id = 5;
+  int32 ban_time = 6;
+}
+
+message ListChannelUsersBannedEvent {
+  repeated int64 banned_user_ids = 1;
+}
+
+message ChannelCanvas {
+  int64 id = 1;
+  string title = 2;
+  string content = 3;
+  int64 creator_id = 4;
+  int64 editor_id = 5;
+  bool is_default = 6;
+  int64 channel_id = 7;
+  int32 status = 8;
+}
+
+message IncomingCallPush {
+  int64 receiver_id = 1;
+  string json_data = 3;
+  int64 channel_id = 4;
+  int64 caller_id = 5;
+}
+
+message WebrtcSignalingFwd {
+  int64 receiver_id = 1;
+  int32 data_type = 2;
+  string json_data = 3;
+  int64 channel_id = 4;
+  int64 caller_id = 5;
+}
+
+message SFUSignalingFwd {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int32 data_type = 3;
+  string json_data = 4;
+  int64 user_id = 5;
+}
+
+message AddClanUserEvent {
+  int64 clan_id = 1;
+  UserProfileRedis user = 2;
+  string invitor = 3;
+}
+
+message RoleAssignedEvent {
+  string ClanId = 1;
+  int64 role_id = 2;
+  repeated int64 user_ids_assigned = 3;
+  repeated int64 user_ids_removed = 4;
+}
+
+message PermissionRoleChannel {
+  int64 permission_id = 1;
+  bool active = 2;
+}
+
+message HashtagDm {
+  int64 channel_id = 1;
+  string channel_label = 2;
+  int64 clan_id = 3;
+  string clan_name = 4;
+  string meeting_code = 5;
+  int32 type = 6;
+  int32 channel_private = 7;
+  int64 parent_id = 8;
+}
+
+message ChannelDescription {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  google.protobuf.Int32Value type = 3;
+  string channel_label = 4;
+  int32 channel_private = 5;
+  string meeting_code = 6;
+  string clan_name = 7;
+  int64 parent_id = 8;
+  .mezon.api.ChannelMessageHeader last_sent_message = 12;
+}
+
+message ClanEmoji {
+  int64 id = 1;
+  string src = 2;
+  string shortname = 3;
+  string category = 4;
+  int64 creator_id = 5;
+  int64 clan_id = 6;
+  string logo = 7;
+  string clan_name = 8;
+}
+
+message Channel {
+  int64 id = 1;
+  repeated UserPresence presences = 2;
+  UserPresence self = 3;
+  string chanel_label = 4;
+  string clan_logo = 5;
+  string category_name = 6;
+}
+
+message ClanJoin {
+  int64 clan_id = 1;
+}
+
+message ChannelJoin {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int32 channel_type = 3;
+  bool is_public = 4;
+}
+
+message ChannelLeave {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int32 channel_type = 3;
+  bool is_public = 4;
+}
+
+message ChannelMessageAck {
+  int64 channel_id = 1;
+  int64 message_id = 2;
+  int32 code = 3;
+  string username = 4;
+  uint32 create_time_seconds = 5;
+  uint32 update_time_seconds = 6;
+  google.protobuf.BoolValue persistent = 7;
+  string clan_logo = 8;
+  string category_name = 9;
+}
+
+message EphemeralMessageSend {
+  ChannelMessageSend message = 1;
+  repeated int64 receiver_ids = 2;
+}
+
+message QuickMenuDataEvent {
+  string menu_name = 1;
+  ChannelMessageSend message = 2;
+  int64 sender_id = 3;
+  int64 message_sender_id = 4;
+}
+
+message VoiceReactionSend {
+  repeated string emojis = 1;
+  int64 channel_id = 2;
+  int64 sender_id = 3;
+  int32 media_type = 4;
+}
+
+message MarkAsRead {
+  int64 channel_id = 1;
+  int64 category_id = 2;
+  int64 clan_id = 3;
+}
+
+message ChannelMessageSend {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  string content = 3;
+  repeated .mezon.api.MessageMention mentions = 4;
+  repeated .mezon.api.MessageAttachment attachments = 5;
+  repeated .mezon.api.MessageRef references = 6;
+  int32 mode = 7;
+  bool anonymous_message = 8;
+  bool mention_everyone = 9;
+  string avatar = 10;
+  bool is_public = 11;
+  int32 code = 12;
+  int64 topic_id = 13;
+  int64 id = 14;
+}
+
+message ChannelMessageUpdate {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int64 message_id = 3;
+  string content = 4;
+  repeated .mezon.api.MessageMention mentions = 5;
+  repeated .mezon.api.MessageAttachment attachments = 6;
+  int32 mode = 7;
+  bool is_public = 8;
+  bool hide_editted = 9;
+  int64 topic_id = 10;
+  bool is_update_msg_topic = 11;
+  uint32 create_time_seconds = 12;
+}
+
+message ChannelMessageRemove {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int64 message_id = 3;
+  int32 mode = 4;
+  bool is_public = 5;
+  bool has_attachment = 6;
+  int64 topic_id = 7;
+  bytes mentions = 8;
+  bytes references = 9;
+}
+
+message ChannelPresenceEvent {
+  int64 channel_id = 1;
+  repeated UserPresence joins = 2;
+  repeated UserPresence leaves = 3;
+  string clan_logo = 4;
+  string category_name = 5;
+  int32 mode = 6;
+}
+
+message Error {
+  int32 code = 1;
+  string message = 2;
+  map<string, string> context = 3;
+}
+
+message Notifications {
+  repeated .mezon.api.Notification notifications = 1;
+}
+
+message AddFriend {
+  int64 user_id = 1;
+  string username = 2;
+  string display_name = 3;
+  string avatar = 4;
+}
+
+message RemoveFriend {
+  int64 user_id = 1;
+}
+
+message BlockFriend {
+  int64 user_id = 1;
+}
+
+message UnblockFriend {
+  int64 user_id = 1;
+  string username = 2;
+  string avatar = 3;
+  string display_name = 4;
+  string status = 5;
+  string user_status = 6;
+}
+
+message Ping {
+}
+
+message Pong {
+}
+
+message Status {
+  repeated UserPresence presences = 1;
+}
+
+message StatusFollow {
+  repeated int64 user_ids = 1;
+  repeated string usernames = 2;
+}
+
+message StatusPresenceEvent {
+  repeated UserPresence joins = 2;
+  repeated UserPresence leaves = 3;
+}
+
+message LastPinMessageEvent {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int64 message_id = 3;
+  int32 mode = 4;
+  int64 user_id = 5;
+  uint32 timestamp_seconds = 6;
+  int32 operation = 7;
+  bool is_public = 8;
+  string message_sender_avatar = 9;
+  string message_sender_id = 10;
+  string message_sender_username = 11;
+  string message_content = 12;
+  string message_attachment = 13;
+  string message_created_time = 14;
+}
+
+message LastSeenMessageEvent {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int64 message_id = 3;
+  int32 mode = 4;
+  uint32 timestamp_seconds = 5;
+  int32 badge_count = 6;
+}
+
+message MessageTypingEvent {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int64 sender_id = 3;
+  int32 mode = 4;
+  bool is_public = 5;
+  string sender_username = 6;
+  string sender_display_name = 7;
+  int64 topic_id = 8;
+}
+
+message VoiceLeavedEvent {
+  string id = 1;
+  int64 clan_id = 2;
+  int64 voice_channel_id = 3;
+  int64 voice_user_id = 4;
+}
+
+message VoiceJoinedEvent {
+  int64 clan_id = 1;
+  string clan_name = 2;
+  string id = 3;
+  string participant = 4;
+  int64 user_id = 5;
+  string voice_channel_label = 6;
+  int64 voice_channel_id = 7;
+  string last_screenshot = 8;
+}
+
+message VoiceStartedEvent {
+  string id = 1;
+  int64 clan_id = 2;
+  int64 voice_channel_id = 3;
+}
+
+message VoiceEndedEvent {
+  int64 id = 1;
+  int64 clan_id = 2;
+  string voice_channel_id = 3;
+}
+
+message StreamingLeavedEvent {
+  int64 id = 1;
+  int64 clan_id = 2;
+  string streaming_channel_id = 3;
+  string streaming_user_id = 4;
+}
+
+message StreamingJoinedEvent {
+  int64 clan_id = 1;
+  string clan_name = 2;
+  int64 id = 3;
+  string participant = 4;
+  int64 user_id = 5;
+  string streaming_channel_label = 6;
+  int64 streaming_channel_id = 7;
+}
+
+message StreamingStartedEvent {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  string streaming_url = 3;
+  bool is_streaming = 4;
+}
+
+message StreamingEndedEvent {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+}
+
+message ChannelCreatedEvent {
+  int64 clan_id = 1;
+  int64 category_id = 2;
+  int64 creator_id = 3;
+  int64 parent_id = 4;
+  int64 channel_id = 5;
+  string channel_label = 6;
+  int32 channel_private = 7;
+  int32 channel_type = 8;
+  int32 status = 9;
+  int64 app_id = 10;
+  string clan_name = 11;
+  string channel_avatar = 12;
+}
+
+message CategoryEvent {
+  int64 creator_id = 1;
+  int64 clan_id = 2;
+  string category_name = 3;
+  int64 id = 4;
+  int32 status = 5;
+}
+
+message RoleEvent {
+  .mezon.api.Role role = 1;
+  int32 status = 2;
+  int64 user_id = 3;
+  repeated int64 user_add_ids = 4;
+  repeated int64 user_remove_ids = 5;
+  repeated int64 active_permission_ids = 6;
+  repeated int64 remove_permission_ids = 7;
+}
+
+message ChannelDeletedEvent {
+  int64 clan_id = 1;
+  int64 category_id = 2;
+  int64 parent_id = 3;
+  int64 channel_id = 4;
+  string deletor = 5;
+}
+
+message ClanDeletedEvent {
+  int64 clan_id = 1;
+  int64 deletor = 2;
+}
+
+message StickerCreateEvent {
+  int64 clan_id = 1;
+  string source = 2;
+  string shortname = 3;
+  string category = 4;
+  int64 creator_id = 5;
+  int64 sticker_id = 6;
+  string logo = 7;
+  string clan_name = 8;
+}
+
+message StickerUpdateEvent {
+  string shortname = 1;
+  int64 sticker_id = 2;
+  int64 user_id = 3;
+}
+
+message StickerDeleteEvent {
+  int64 sticker_id = 2;
+  int64 user_id = 3;
+}
+
+message ChannelUpdatedEvent {
+  int64 clan_id = 1;
+  int64 category_id = 2;
+  int64 creator_id = 3;
+  int64 parent_id = 4;
+  int64 channel_id = 5;
+  string channel_label = 6;
+  int32 channel_type = 7;
+  int32 status = 8;
+  string meeting_code = 9;
+  bool is_error = 10;
+  bool channel_private = 11;
+  int64 app_id = 12;
+  int32 e2ee = 13;
+  string topic = 14;
+  int32 age_restricted = 15;
+  int32 active = 16;
+  int32 count_mess_unread = 17;
+  repeated int64 user_ids = 18;
+  repeated int64 role_ids = 19;
+  string channel_avatar = 20;
+}
+
+message StatusUnfollow {
+  repeated int64 user_ids = 1;
+}
+
+message StatusUpdate {
+  google.protobuf.StringValue status = 1;
+}
+
+message Stream {
+  int32 mode = 1;
+  int64 channel_id = 2;
+  int64 clan_id = 3;
+  string label = 4;
+}
+
+message StreamData {
+  Stream stream = 1;
+  UserPresence sender = 2;
+  string data = 3;
+  bool reliable = 4;
+}
+
+message StreamPresenceEvent {
+  Stream stream = 1;
+  repeated UserPresence joins = 2;
+  repeated UserPresence leaves = 3;
+}
+
+message UserPresence {
+  int64 user_id = 1;
+  int32 session_id = 2;
+  string username = 3;
+  google.protobuf.StringValue status = 4;
+  bool is_mobile = 5;
+  string user_status = 6;
+}
+
+message CustomStatusEvent {
+  int64 clan_id = 1;
+  int64 user_id = 2;
+  string username = 3;
+  string status = 4;
+  int32 time_reset = 5;
+  bool no_clear = 6;
+}
+
+message UserChannelAdded {
+  .mezon.api.ChannelDescription channel_desc = 1;
+  repeated UserProfileRedis users = 2;
+  string status = 3;
+  int64 clan_id = 4;
+  UserProfileRedis caller = 5;
+  uint32 create_time_seconds = 6;
+  int32 active = 7;
+}
+
+message UserChannelRemoved {
+  int64 channel_id = 1;
+  repeated int64 user_ids = 2;
+  int32 channel_type = 3;
+  int64 clan_id = 4;
+  repeated int32 badge_counts = 6;
+}
+
+message UserClanRemoved {
+  int64 clan_id = 1;
+  repeated int64 user_ids = 2;
+}
+
+message ClanCreatedEvent {
+  int64 clan_id = 1;
+  string clan_name = 2;
+  string logo = 3;
+  int64 creator_id = 4;
+  int64 welcome_channel_id = 5;
+}
+
+message ClanUpdatedEvent {
+  int64 clan_id = 1;
+  string clan_name = 2;
+  string logo = 3;
+  string banner = 4;
+  int32 status = 5;
+  bool is_onboarding = 6;
+  int64 welcome_channel_id = 7;
+  string onboarding_banner = 8;
+  string community_banner = 9;
+  bool is_community = 10;
+  string about = 11;
+  string description = 12;
+  bool prevent_anonymous = 13;
+}
+
+message ClanProfileUpdatedEvent {
+  int64 user_id = 1;
+  string clan_nick = 2;
+  string clan_avatar = 3;
+  int64 clan_id = 4;
+}
+
+message UserProfileUpdatedEvent {
+  int64 user_id = 1;
+  string display_name = 2;
+  string avatar = 3;
+  string about_me = 4;
+  int64 channel_id = 5;
+  int64 clan_id = 6;
+  string encrypt_private_key = 7;
+}
+
+message ConfirmLinkMezonOTPData {
+  int32 type = 1;
+  string value = 2;
+}
+
+message UserProfileRedis {
+  int64 user_id = 1;
+  string username = 2;
+  string avatar = 3;
+  string display_name = 4;
+  string user_status = 5;
+  string status = 6;
+  bool online = 7;
+  repeated FCMTokens fcm_tokens = 8;
+  repeated int64 joined_clans = 9;
+  string app_token = 10;
+  uint32 create_time_second = 11;
+  string app_url = 12;
+  bool is_bot = 13;
+  string voip_token = 14;
+}
+
+message FCMTokens {
+  string device_id = 1;
+  string token_id = 2;
+  string platform = 3;
+}
+
+message CheckNameExistedEvent {
+  string name = 1;
+  int64 condition_id = 2;
+  bool exist = 3;
+  int32 type = 4;
+  int64 clan_id = 5;
+}
+
+message NotificationChannelCategorySetting {
+  int64 id = 1;
+  string channel_category_label = 2;
+  int32 notification_setting_type = 3;
+  string channel_category_title = 4;
+  int32 action = 5;
+}
+
+message EventEmoji {
+  int64 id = 1;
+  int64 clan_id = 2;
+  string short_name = 3;
+  string source = 4;
+  string category = 5;
+  int32 action = 6;
+  int64 user_id = 7;
+  string logo = 8;
+  string clan_name = 9;
+  bool is_for_sale = 10;
+}
+
+message PermissionSetEvent {
+  string caller = 1;
+  int64 role_id = 2;
+  int64 user_id = 3;
+  int64 channel_id = 4;
+  repeated .mezon.api.PermissionUpdate permission_updates = 5;
+}
+
+message PermissionChangedEvent {
+  int64 user_id = 1;
+  int64 channel_id = 2;
+  repeated .mezon.api.PermissionUpdate add_permissions = 3;
+  repeated .mezon.api.PermissionUpdate remove_permissions = 4;
+  repeated .mezon.api.PermissionUpdate default_permissions = 5;
+}
+
+message MessageButtonClicked {
+  int64 message_id = 1;
+  int64 channel_id = 2;
+  string button_id = 3;
+  int64 sender_id = 4;
+  int64 user_id = 5;
+  string extra_data = 6;
+}
+
+message UnmuteEvent {
+  int64 channel_id = 1;
+  int64 category_id = 2;
+  int64 clan_id = 3;
+}
+
+message ListActivity {
+  repeated .mezon.api.UserActivity acts = 1;
+}
+
+message DropdownBoxSelected {
+  int64 message_id = 1;
+  int64 channel_id = 2;
+  string selectbox_id = 3;
+  int64 sender_id = 4;
+  int64 user_id = 5;
+  repeated string values = 6;
+}
+
+message SdTopicEvent {
+  int64 id = 1;
+  int64 clan_id = 2;
+  int64 channel_id = 3;
+  int64 message_id = 4;
+  int64 user_id = 5;
+  .mezon.api.ChannelMessageHeader last_sent_message = 6;
+  .mezon.api.ChannelMessage message = 7;
+}
+
+message ChannelAppEvent {
+  int64 user_id = 1;
+  string username = 2;
+  int64 clan_id = 3;
+  int64 channel_id = 4;
+  int32 action = 5;
+}
+
+message UserStatusEvent {
+  int64 user_id = 1;
+  string custom_status = 2;
+}
+
+message JoinChannelAppData {
+  int64 user_id = 1;
+  string username = 2;
+  string hash = 3;
+}
+
+message UnpinMessageEvent {
+  int64 id = 1;
+  int64 message_id = 2;
+  int64 channel_id = 3;
+  int64 clan_id = 4;
+}
+
+message HandleParticipantMeetStateEvent {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  string display_name = 3;
+  int32 state = 4;
+  string room_name = 5;
+}
+
+message DeleteAccountEvent {
+  int64 user_id = 1;
+}
+
+message ListDataSocket {
+  string api_name = 1;
+  .mezon.api.ListChannelBadgeCountRequest list_channel_badge_count_req = 2;
+  .mezon.api.ListChannelBadgeCountResponse channel_badge_count = 3;
+  .mezon.api.ListClanBadgeCountResponse clan_badge_count = 4;
+  .mezon.api.LogedDeviceList list_loged_device = 5;
+  .mezon.api.ListUserOnlineRequest list_user_online_req = 6;
+  .mezon.api.ListUserOnlineResponse user_online_list = 7;
+}
+
+message MeetParticipantEvent {
+  string username = 1;
+  string room_name = 2;
+  int64 channel_id = 3;
+  int64 clan_id = 4;
+  int32 action = 5;
+}
+
+message TransferOwnershipEvent {
+  int64 clan_id = 1;
+  int64 prev_owner = 2;
+  int64 curr_owner = 3;
+}
+
+message ActiveArchivedThread {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+}
+
+message AllowAnonymousEvent {
+  int64 clan_id = 1;
+  bool allow = 2;
+}
+
+message FcmDataPayload {
+  int32 command_type = 1;
+  int64 receiver_id = 2;
+  string title = 3;
+  bytes body = 4;
+  repeated int64 user_role_ids = 5;
+  repeated int64 user_sent_ids = 6;
+  int32 priority = 7;
+  .mezon.api.ChannelMessage message = 8;
+  bool is_e2ee = 9;
+  bool is_dm = 10;
+  bool mention_here = 11;
+  repeated .mezon.api.MessageMention mentions = 12;
+  repeated .mezon.api.MessageRef references = 13;
+  repeated .mezon.api.MessageAttachment attachments = 14;
+}
+
+message AIAgentEnabledEvent {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  string room_name = 3;
+  bool enabled = 4;
+}
+
+message GotifyMessage {
+  uint32 id = 1;
+  int64 channel_id = 2;
+  string message = 3;
+  string title = 4;
+  string image = 5;
+  int32 priority = 6;
+  repeated string users = 7;
+  map<string, string> extras = 8;
+  uint32 app_id = 9;
+  int64 sender_id = 10;
+}

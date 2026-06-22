@@ -1,456 +1,339 @@
-package mezonlightsdk
+package mezon
 
 import (
-	"context"
-	"encoding/json"
-	"log"
+	"fmt"
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
-
-	"github.com/quangledang23/mezon-sdk-go/proto"
+	"github.com/quangledang23/mezon-sdk-go/rtapi"
+	"google.golang.org/protobuf/proto"
 )
-
-// Default socket timeouts, mirroring DefaultSocket in socket.gen.ts.
-const (
-	DefaultHeartbeatTimeout = 10 * time.Second
-	DefaultSendTimeout      = 10 * time.Second
-	DefaultConnectTimeout   = 30 * time.Second
-)
-
-// ConnectionState describes the socket connection lifecycle.
-type ConnectionState int32
 
 const (
-	StateDisconnected ConnectionState = iota
-	StateConnecting
-	StateConnected
+	defaultHeartbeatTimeout = 10 * time.Second
+	defaultSendTimeout      = 10 * time.Second
+	defaultConnectTimeout   = 30 * time.Second
 )
 
-// ChatMessageOptions holds the optional parameters of WriteChatMessage.
-type ChatMessageOptions struct {
-	Mentions         []*proto.MessageMention
-	Attachments      []*proto.MessageAttachment
-	References       []*proto.MessageRef
+// ReplyMessageData is the payload for writing/replying a chat message.
+type ReplyMessageData struct {
+	ClanID           string
+	ChannelID        string
+	Mode             int
+	IsPublic         bool
+	Content          Content
+	Mentions         []Mention
+	Attachments      []Attachment
+	References       []MessageRef
 	AnonymousMessage bool
 	MentionEveryone  bool
 	Avatar           string
-	Code             int32
+	Code             int
 	TopicID          string
-	ID               string
 }
 
-type envelopeResult struct {
-	env *proto.Envelope
-	err error
+// EphemeralMessageData is the payload for an ephemeral message.
+type EphemeralMessageData struct {
+	ReceiverIDs      []string
+	ClanID           string
+	ChannelID        string
+	Mode             int
+	IsPublic         bool
+	Content          Content
+	Mentions         []Mention
+	Attachments      []Attachment
+	References       []MessageRef
+	AnonymousMessage bool
+	MentionEveryone  bool
+	Avatar           string
+	Code             int
+	TopicID          string
+	MessageID        string
 }
 
-// DefaultSocket is a socket connection to the Mezon server speaking the
-// protobuf realtime protocol, the Go counterpart of DefaultSocket +
-// WebSocketAdapterPb in the TypeScript SDK.
-//
-// Callback fields must be set before Connect and not mutated afterwards.
+// UpdateMessageData is the payload for editing a message.
+type UpdateMessageData struct {
+	ClanID            string
+	ChannelID         string
+	Mode              int
+	IsPublic          bool
+	MessageID         string
+	Content           Content
+	Mentions          []Mention
+	Attachments       []Attachment
+	CreateTimeSeconds uint32
+	HideEditted       bool
+	TopicID           string
+	IsUpdateMsgTopic  bool
+}
+
+// ReactMessageData is the payload for reacting to a message.
+type ReactMessageData struct {
+	ID              string
+	ClanID          string
+	ChannelID       string
+	Mode            int
+	IsPublic        bool
+	MessageID       string
+	EmojiID         string
+	Emoji           string
+	Count           int
+	MessageSenderID string
+	ActionDelete    bool
+}
+
+// RemoveMessageData is the payload for deleting a message.
+type RemoveMessageData struct {
+	ClanID    string
+	ChannelID string
+	Mode      int
+	IsPublic  bool
+	MessageID string
+	TopicID   string
+}
+
+// DefaultSocket is a protobuf WebSocket connection to the Mezon server, port of
+// DefaultSocket + WebSocketAdapterPb in the TS SDK. It encodes/decodes
+// rtapi.Envelope frames over a binary WebSocket and correlates request/response
+// pairs by cid.
 type DefaultSocket struct {
-	Host    string
-	Port    string
-	UseSSL  bool
+	wsURL   string
+	host    string
+	port    string
+	useSSL  bool
 	Verbose bool
 
-	// SendTimeout bounds request/response exchanges such as JoinChat.
-	SendTimeout time.Duration
-
-	// OnReconnect is called when the socket connects again after having
-	// connected at least once before.
-	OnReconnect func()
-	// OnDisconnect is called when the connection is lost or closed.
-	OnDisconnect func()
-	// OnError is called for transport or decode errors.
-	OnError func(err error)
-	// OnHeartbeatTimeout is called when the server stops answering
-	// application-level pings.
-	OnHeartbeatTimeout func()
-	// OnChannelMessage receives incoming channel messages.
-	OnChannelMessage func(message *ChannelMessage)
-
-	mu                 sync.Mutex
-	conn               *websocket.Conn
-	state              ConnectionState
-	done               chan struct{}
-	pending            map[int32]chan envelopeResult
-	nextCid            int32
-	hasConnectedOnce   bool
-	suppressDisconnect bool
-
+	conn    *websocket.Conn
 	writeMu sync.Mutex
 
-	heartbeatMu      sync.Mutex
+	cidMu   sync.Mutex
+	cids    map[int32]chan *rtapi.Envelope
+	nextCid int32
+
 	heartbeatTimeout time.Duration
+	sendTimeout      time.Duration
+
+	connected atomic.Bool
+	// done is closed when the current connection is torn down; closeDone closes
+	// it at most once. Both are replaced (under writeMu) on every Connect so each
+	// connection has its own teardown signal, and read under writeMu by
+	// send/Close/markDisconnected.
+	done      chan struct{}
+	closeDone func()
+
+	emit func(event string, payload any)
+
+	// optional lifecycle callbacks
+	OnDisconnect       func(reason string)
+	OnError            func(err error)
+	OnHeartbeatTimeout func()
 }
 
-// NewDefaultSocket creates a socket for the given host/port. The socket is
-// not connected until Connect is called.
-func NewDefaultSocket(host, port string, useSSL, verbose bool) *DefaultSocket {
+// NewDefaultSocket creates a socket. wsURL is the host portion used to build the
+// websocket URL (typically session.WsURL); when empty, host[:port] is used.
+func NewDefaultSocket(wsURL, host, port string, useSSL bool, emit func(string, any)) *DefaultSocket {
 	return &DefaultSocket{
-		Host:             host,
-		Port:             port,
-		UseSSL:           useSSL,
-		Verbose:          verbose,
-		SendTimeout:      DefaultSendTimeout,
-		heartbeatTimeout: DefaultHeartbeatTimeout,
+		wsURL:            wsURL,
+		host:             host,
+		port:             port,
+		useSSL:           useSSL,
+		cids:             make(map[int32]chan *rtapi.Envelope),
+		nextCid:          1,
+		heartbeatTimeout: defaultHeartbeatTimeout,
+		sendTimeout:      defaultSendTimeout,
+		emit:             emit,
+		done:             make(chan struct{}),
 	}
 }
 
-// IsOpen reports whether the connection is established.
-func (s *DefaultSocket) IsOpen() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.state == StateConnected
-}
+// IsOpen reports whether the socket is connected.
+func (s *DefaultSocket) IsOpen() bool { return s.connected.Load() }
 
-// SetHeartbeatTimeout sets the heartbeat interval/timeout used to detect a
-// lost connection.
-func (s *DefaultSocket) SetHeartbeatTimeout(d time.Duration) {
-	s.heartbeatMu.Lock()
-	defer s.heartbeatMu.Unlock()
-	s.heartbeatTimeout = d
-}
-
-// HeartbeatTimeout returns the heartbeat interval/timeout.
-func (s *DefaultSocket) HeartbeatTimeout() time.Duration {
-	s.heartbeatMu.Lock()
-	defer s.heartbeatMu.Unlock()
-	return s.heartbeatTimeout
-}
-
-// Connect dials the realtime endpoint and starts the read and heartbeat
-// loops. If the socket is already connected it returns immediately. If ctx
-// carries no deadline, DefaultConnectTimeout applies to the handshake.
-func (s *DefaultSocket) Connect(ctx context.Context, session *Session, createStatus bool, platform string) error {
-	s.mu.Lock()
-	if s.state == StateConnected {
-		s.mu.Unlock()
-		return nil
-	}
-	if s.state == StateConnecting {
-		s.mu.Unlock()
-		return &SocketError{Message: "socket connection already in progress"}
-	}
-	s.state = StateConnecting
-	s.mu.Unlock()
-
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, DefaultConnectTimeout)
-		defer cancel()
-	}
-
+func (s *DefaultSocket) buildURL(token string, createStatus bool) string {
 	scheme := "ws"
-	if s.UseSSL {
+	if s.useSSL {
 		scheme = "wss"
 	}
-	hostPort := s.Host
-	if s.Port != "" {
-		hostPort += ":" + s.Port
+	wsHost := s.wsURL
+	if wsHost == "" {
+		wsHost = s.host
+		if s.port != "" && s.port != "443" && s.port != "80" {
+			wsHost = s.host + ":" + s.port
+		}
 	}
-	wsURL := scheme + "://" + hostPort + "/ws?lang=en&status=" + url.QueryEscape(strconv.FormatBool(createStatus)) +
-		"&token=" + url.QueryEscape(session.Token) +
-		"&format=protobuf&platform=" + url.QueryEscape(platform)
+	q := url.Values{}
+	q.Set("lang", "en")
+	q.Set("status", strconv.FormatBool(createStatus))
+	q.Set("token", token)
+	q.Set("format", "protobuf")
+	return fmt.Sprintf("%s://%s/ws?%s", scheme, wsHost, q.Encode())
+}
 
-	dialer := *websocket.DefaultDialer
-	conn, resp, err := dialer.DialContext(ctx, wsURL, nil)
-	if resp != nil && resp.Body != nil {
-		resp.Body.Close()
+// Connect establishes the websocket connection using the session token.
+func (s *DefaultSocket) Connect(session *Session, createStatus bool) error {
+	if s.IsOpen() {
+		return nil
 	}
+	dialer := websocket.Dialer{HandshakeTimeout: defaultConnectTimeout}
+	conn, _, err := dialer.Dial(s.buildURL(session.Token, createStatus), nil)
 	if err != nil {
-		s.mu.Lock()
-		s.state = StateDisconnected
-		s.mu.Unlock()
 		if s.OnError != nil {
 			s.OnError(err)
 		}
 		return err
 	}
-
-	s.mu.Lock()
+	// Publish the new connection state under writeMu (read by send/Close/
+	// markDisconnected) and hand the fresh conn/done to the loops as locals, so a
+	// later reconnect that reassigns these fields cannot race the goroutines
+	// started here.
+	done := make(chan struct{})
+	var once sync.Once
+	closeDone := func() { once.Do(func() { close(done) }) }
+	s.writeMu.Lock()
 	s.conn = conn
-	s.done = make(chan struct{})
-	s.pending = make(map[int32]chan envelopeResult)
-	s.state = StateConnected
-	isReconnect := s.hasConnectedOnce
-	s.hasConnectedOnce = true
-	done := s.done
-	s.mu.Unlock()
-
+	s.done = done
+	s.closeDone = closeDone
+	s.writeMu.Unlock()
+	s.connected.Store(true)
 	go s.readLoop(conn)
 	go s.heartbeatLoop(done)
-
-	if isReconnect && s.OnReconnect != nil {
-		s.OnReconnect()
-	}
 	return nil
 }
 
-// Disconnect closes the connection. When fireDisconnectEvent is true the
-// OnDisconnect callback is invoked, matching the TypeScript SDK behavior.
-func (s *DefaultSocket) Disconnect(fireDisconnectEvent bool) {
-	s.mu.Lock()
-	conn := s.conn
-	if conn != nil {
-		// The read loop will tear the connection down; keep it from firing
-		// OnDisconnect a second time.
-		s.suppressDisconnect = true
+// Close shuts down the connection.
+func (s *DefaultSocket) Close() {
+	s.connected.Store(false)
+	s.writeMu.Lock()
+	closeDone, conn := s.closeDone, s.conn
+	s.writeMu.Unlock()
+	if closeDone != nil {
+		closeDone()
 	}
-	s.state = StateDisconnected
-	s.mu.Unlock()
-
 	if conn != nil {
-		conn.Close()
-	}
-	if fireDisconnectEvent && s.OnDisconnect != nil {
-		s.OnDisconnect()
+		_ = conn.Close()
 	}
 }
 
-// readLoop receives envelopes until the connection drops, dispatching
-// incoming channel messages and resolving request/response exchanges.
+func (s *DefaultSocket) generateCid() int32 {
+	return atomic.AddInt32(&s.nextCid, 1) - 1
+}
+
+// send writes an envelope and waits for the cid-correlated response.
+func (s *DefaultSocket) send(env *rtapi.Envelope, timeout time.Duration) (*rtapi.Envelope, error) {
+	if !s.IsOpen() {
+		return nil, ErrSocketClosed
+	}
+	cid := s.generateCid()
+	env.Cid = cid
+	ch := make(chan *rtapi.Envelope, 1)
+
+	s.cidMu.Lock()
+	s.cids[cid] = ch
+	s.cidMu.Unlock()
+
+	data, err := proto.Marshal(env)
+	if err != nil {
+		s.clearCid(cid)
+		return nil, err
+	}
+
+	s.writeMu.Lock()
+	conn, done := s.conn, s.done
+	err = conn.WriteMessage(websocket.BinaryMessage, data)
+	s.writeMu.Unlock()
+	if err != nil {
+		s.clearCid(cid)
+		return nil, err
+	}
+
+	if timeout <= 0 {
+		timeout = s.sendTimeout
+	}
+	select {
+	case resp := <-ch:
+		if resp.Error != nil {
+			return nil, fmt.Errorf("mezon socket error %d: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return resp, nil
+	case <-time.After(timeout):
+		s.clearCid(cid)
+		return nil, ErrSendTimeout
+	case <-done:
+		return nil, ErrSocketClosed
+	}
+}
+
+func (s *DefaultSocket) clearCid(cid int32) {
+	s.cidMu.Lock()
+	delete(s.cids, cid)
+	s.cidMu.Unlock()
+}
+
 func (s *DefaultSocket) readLoop(conn *websocket.Conn) {
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
-			s.teardown()
+			s.markDisconnected(err.Error())
 			return
 		}
-
-		env := &proto.Envelope{}
-		if uerr := env.Unmarshal(data); uerr != nil {
-			if s.OnError != nil {
-				s.OnError(uerr)
-			}
-			continue
-		}
-		if s.Verbose {
-			raw, _ := json.Marshal(env)
-			log.Printf("mezonlightsdk: response: %s", raw)
-		}
-
-		// Inbound message from the server (no cid).
-		if env.Cid == 0 {
-			if env.ChannelMessage != nil {
-				if handler := s.OnChannelMessage; handler != nil {
-					handler(newChannelMessageFromProto(env.ChannelMessage))
-				}
-			} else if s.Verbose {
-				log.Printf("mezonlightsdk: unrecognized message received: %+v", env)
-			}
-			continue
-		}
-
-		s.mu.Lock()
-		ch := s.pending[env.Cid]
-		delete(s.pending, env.Cid)
-		s.mu.Unlock()
-		if ch == nil {
+		env := &rtapi.Envelope{}
+		if err := proto.Unmarshal(data, env); err != nil {
 			if s.Verbose {
-				log.Printf("mezonlightsdk: no pending request for cid %d", env.Cid)
+				fmt.Println("mezon: failed to decode envelope:", err)
 			}
 			continue
 		}
-		if env.Error != nil {
-			ch <- envelopeResult{err: &SocketError{Code: env.Error.Code, Message: env.Error.Message, Context: env.Error.Context}}
-		} else {
-			ch <- envelopeResult{env: env}
+		if env.Cid != 0 {
+			s.cidMu.Lock()
+			ch, ok := s.cids[env.Cid]
+			if ok {
+				delete(s.cids, env.Cid)
+			}
+			s.cidMu.Unlock()
+			if ok {
+				ch <- env
+			}
+			continue
 		}
+		s.dispatch(env)
 	}
 }
 
-// teardown finalizes a dropped connection: it stops the heartbeat loop,
-// fails all pending requests, and fires OnDisconnect unless suppressed.
-func (s *DefaultSocket) teardown() {
-	s.mu.Lock()
-	if s.conn == nil {
-		s.mu.Unlock()
+func (s *DefaultSocket) markDisconnected(reason string) {
+	if !s.connected.Swap(false) {
 		return
 	}
-	s.conn = nil
-	s.state = StateDisconnected
-	if s.done != nil {
-		close(s.done)
-		s.done = nil
+	s.writeMu.Lock()
+	closeDone := s.closeDone
+	s.writeMu.Unlock()
+	if closeDone != nil {
+		closeDone()
 	}
-	pending := s.pending
-	s.pending = nil
-	suppress := s.suppressDisconnect
-	s.suppressDisconnect = false
-	s.mu.Unlock()
-
-	for _, ch := range pending {
-		ch <- envelopeResult{err: &SocketError{Message: "socket connection closed"}}
-	}
-	if !suppress && s.OnDisconnect != nil {
-		s.OnDisconnect()
+	if s.OnDisconnect != nil {
+		s.OnDisconnect(reason)
 	}
 }
 
-// heartbeatLoop sends application-level pings and closes the connection when
-// the server stops answering.
 func (s *DefaultSocket) heartbeatLoop(done chan struct{}) {
 	for {
-		timeout := s.HeartbeatTimeout()
 		select {
 		case <-done:
 			return
-		case <-time.After(timeout):
+		case <-time.After(s.heartbeatTimeout):
 			if !s.IsOpen() {
 				return
 			}
-			if _, err := s.send(context.Background(), &proto.Envelope{Ping: &proto.Ping{}}, timeout); err != nil {
-				if !s.IsOpen() {
-					return
-				}
-				if s.Verbose {
-					log.Println("mezonlightsdk: server unreachable from heartbeat")
-				}
+			if _, err := s.send(&rtapi.Envelope{Ping: &rtapi.Ping{}}, s.heartbeatTimeout); err != nil {
 				if s.OnHeartbeatTimeout != nil {
 					s.OnHeartbeatTimeout()
 				}
-				s.mu.Lock()
-				conn := s.conn
-				s.mu.Unlock()
-				if conn != nil {
-					conn.Close()
-				}
+				s.Close()
 				return
 			}
 		}
 	}
-}
-
-// send writes an envelope tagged with a fresh cid and waits for the matching
-// response. A zero timeout waits indefinitely (bounded only by ctx).
-func (s *DefaultSocket) send(ctx context.Context, env *proto.Envelope, timeout time.Duration) (*proto.Envelope, error) {
-	s.mu.Lock()
-	if s.state != StateConnected || s.conn == nil {
-		s.mu.Unlock()
-		return nil, &SocketError{Message: "socket connection has not been established yet"}
-	}
-	s.nextCid++
-	cid := s.nextCid
-	env.Cid = cid
-	ch := make(chan envelopeResult, 1)
-	s.pending[cid] = ch
-	conn := s.conn
-	done := s.done
-	s.mu.Unlock()
-
-	data := env.Marshal()
-	s.writeMu.Lock()
-	err := conn.WriteMessage(websocket.BinaryMessage, data)
-	s.writeMu.Unlock()
-	if err != nil {
-		s.removePending(cid)
-		return nil, err
-	}
-
-	var timer <-chan time.Time
-	if timeout > 0 {
-		t := time.NewTimer(timeout)
-		defer t.Stop()
-		timer = t.C
-	}
-
-	select {
-	case res := <-ch:
-		return res.env, res.err
-	case <-timer:
-		s.removePending(cid)
-		return nil, &SocketError{Message: "the socket timed out while waiting for a response"}
-	case <-ctx.Done():
-		s.removePending(cid)
-		return nil, ctx.Err()
-	case <-done:
-		return nil, &SocketError{Message: "socket connection closed"}
-	}
-}
-
-func (s *DefaultSocket) removePending(cid int32) {
-	s.mu.Lock()
-	delete(s.pending, cid)
-	s.mu.Unlock()
-}
-
-// JoinClanChat joins clan-level realtime events on the server, which also
-// registers the connection as an active clan member.
-func (s *DefaultSocket) JoinClanChat(ctx context.Context, clanID string) error {
-	_, err := s.send(ctx, &proto.Envelope{
-		ClanJoin: &proto.ClanJoin{ClanID: clanID},
-	}, s.SendTimeout)
-	return err
-}
-
-// JoinChat joins a chat channel on the server.
-func (s *DefaultSocket) JoinChat(ctx context.Context, clanID, channelID string, channelType int32, isPublic bool) (*proto.Channel, error) {
-	res, err := s.send(ctx, &proto.Envelope{
-		ChannelJoin: &proto.ChannelJoin{
-			ClanID:      clanID,
-			ChannelID:   channelID,
-			ChannelType: channelType,
-			IsPublic:    isPublic,
-		},
-	}, s.SendTimeout)
-	if err != nil {
-		return nil, err
-	}
-	return res.Channel, nil
-}
-
-// LeaveChat leaves a chat channel on the server.
-func (s *DefaultSocket) LeaveChat(ctx context.Context, clanID, channelID string, channelType int32, isPublic bool) error {
-	_, err := s.send(ctx, &proto.Envelope{
-		ChannelLeave: &proto.ChannelLeave{
-			ClanID:      clanID,
-			ChannelID:   channelID,
-			ChannelType: channelType,
-			IsPublic:    isPublic,
-		},
-	}, s.SendTimeout)
-	return err
-}
-
-// WriteChatMessage sends a chat message to a channel on the server. The
-// content is JSON-encoded, matching the TypeScript SDK. Like the original,
-// the wait for the acknowledgement is unbounded except by ctx.
-func (s *DefaultSocket) WriteChatMessage(ctx context.Context, clanID, channelID string, mode int32, isPublic bool, content any, opts *ChatMessageOptions) (*proto.ChannelMessageAck, error) {
-	contentJSON, err := json.Marshal(content)
-	if err != nil {
-		return nil, err
-	}
-	if opts == nil {
-		opts = &ChatMessageOptions{}
-	}
-
-	res, err := s.send(ctx, &proto.Envelope{
-		ChannelMessageSend: &proto.ChannelMessageSend{
-			ClanID:           clanID,
-			ChannelID:        channelID,
-			Mode:             mode,
-			IsPublic:         isPublic,
-			Content:          string(contentJSON),
-			Mentions:         opts.Mentions,
-			Attachments:      opts.Attachments,
-			References:       opts.References,
-			AnonymousMessage: opts.AnonymousMessage,
-			MentionEveryone:  opts.MentionEveryone,
-			Avatar:           opts.Avatar,
-			Code:             opts.Code,
-			TopicID:          opts.TopicID,
-			ID:               opts.ID,
-		},
-	}, 0)
-	if err != nil {
-		return nil, err
-	}
-	return res.ChannelMessageAck, nil
 }

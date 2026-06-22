@@ -1,382 +1,314 @@
-package mezonlightsdk
+package mezon
 
 import (
-	"context"
+	"errors"
 	"log"
-	"net/url"
 	"sync"
 	"time"
-
-	"github.com/quangledang23/mezon-sdk-go/proto"
 )
 
-// LightClient provides a simplified interface for Mezon authentication and
-// channel management.
-//
-//	// Initialize from existing tokens:
-//	client, err := mezonlightsdk.InitClient(mezonlightsdk.ClientInitConfig{
-//		Token:        "your-token",
-//		RefreshToken: "your-refresh-token",
-//		APIURL:       "https://api.mezon.ai",
-//		WSURL:        "gw.mezon.ai",
-//		UserID:       "user-123",
-//	})
-//
-//	// Or authenticate with an ID token:
-//	client, err := mezonlightsdk.Authenticate(ctx, mezonlightsdk.AuthenticateConfig{
-//		IDToken:  "id-token-from-provider",
-//		UserID:   "user-123",
-//		Username: "johndoe",
-//	})
-type LightClient struct {
-	session *Session
-	client  *MezonApi
-	userID  string
+// Default connection settings, port of the constants in MezonClientCore.ts.
+const (
+	DefaultHost      = "gw.mezon.ai"
+	DefaultPort      = "443"
+	DefaultUseSSL    = true
+	DefaultTimeoutMs = 7000
+)
 
-	// OnRefreshSession, if set, is called after each successful token
-	// refresh.
-	OnRefreshSession func(session *ApiSession)
-
-	refreshMu   sync.Mutex
-	refreshDone chan struct{}
-	refreshErr  error
+// ClientConfig configures a MezonClient. BotID and Token are required.
+type ClientConfig struct {
+	BotID   string
+	Token   string
+	Host    string
+	Port    string
+	UseSSL  *bool // nil => default (true)
+	Timeout time.Duration
 }
 
-// parseBaseURL extracts "scheme://host[:port]" from a URL, mirroring
-// parseBaseUrl in the TypeScript SDK.
-func parseBaseURL(apiURL string) (string, error) {
-	u, err := url.Parse(apiURL)
-	if err != nil {
-		return "", err
-	}
-	scheme := "http"
-	if u.Scheme == "https" {
-		scheme = "https"
-	}
-	return scheme + "://" + u.Host, nil
+// MezonClient is the high-level Mezon bot client, port of MezonClient +
+// MezonClientCore. Construct with NewMezonClient, register event handlers with
+// On*/On, then call Login.
+type MezonClient struct {
+	Token    string
+	ClientID string
+	Host     string
+	Port     string
+	UseSSL   bool
+	Timeout  time.Duration
+
+	Clans    *CacheManager[string, *Clan]
+	Channels *CacheManager[string, *TextChannel]
+	Users    *CacheManager[string, *User]
+
+	loginBasePath  string
+	apiClient      *MezonApi
+	socket         *DefaultSocket
+	channelManager *ChannelManager
+	session        *Session
+	queue          *AsyncThrottleQueue
+	events         *emitter
+
+	mu             sync.Mutex
+	internalsBound bool
+	hardDisconnect bool
+	reconnecting   bool
 }
 
-// InitClient initializes a LightClient from existing session tokens. Use
-// this when you have stored tokens from a previous authentication.
-func InitClient(config ClientInitConfig) (*LightClient, error) {
-	if config.Token == "" || config.RefreshToken == "" || config.APIURL == "" || config.WSURL == "" || config.UserID == "" {
-		return nil, &SessionError{Message: "missing required fields: Token, RefreshToken, APIURL, WSURL, and UserID are all required"}
+// NewMezonClient creates a client from config, applying defaults.
+func NewMezonClient(cfg ClientConfig) (*MezonClient, error) {
+	if cfg.BotID == "" {
+		return nil, errors.New("botId is required")
 	}
-
-	session, err := RestoreSession(config.Token, config.RefreshToken, config.APIURL, config.WSURL, true)
-	if err != nil {
-		return nil, err
+	if cfg.Token == "" {
+		return nil, errors.New("token is required")
 	}
-
-	serverKey := config.ServerKey
-	if serverKey == "" {
-		serverKey = DefaultServerKey
+	host := cfg.Host
+	if host == "" {
+		host = DefaultHost
 	}
-	basePath, err := parseBaseURL(config.APIURL)
-	if err != nil {
-		return nil, &SessionError{Message: "invalid APIURL: " + err.Error()}
+	port := cfg.Port
+	if port == "" {
+		port = DefaultPort
 	}
-
-	return &LightClient{
-		session: session,
-		client:  NewMezonApi(serverKey, 7*time.Second, basePath),
-		userID:  config.UserID,
-	}, nil
+	useSSL := DefaultUseSSL
+	if cfg.UseSSL != nil {
+		useSSL = *cfg.UseSSL
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeoutMs * time.Millisecond
+	}
+	scheme := "http://"
+	if useSSL {
+		scheme = "https://"
+	}
+	c := &MezonClient{
+		Token:         cfg.Token,
+		ClientID:      cfg.BotID,
+		Host:          host,
+		Port:          port,
+		UseSSL:        useSSL,
+		Timeout:       timeout,
+		loginBasePath: scheme + host + ":" + port,
+		queue:         NewAsyncThrottleQueue(0),
+		events:        newEmitter(),
+	}
+	c.Clans = NewCacheManager[string, *Clan](func(string) (*Clan, error) { return nil, ErrNotFound }, 0)
+	c.Channels = NewCacheManager[string, *TextChannel](c.fetchChannel, 0)
+	c.Users = NewCacheManager[string, *User](c.fetchUser, 0)
+	return c, nil
 }
 
-// Authenticate authenticates a user with an ID token from an identity
-// provider.
-func Authenticate(ctx context.Context, config AuthenticateConfig) (*LightClient, error) {
-	serverKey := config.ServerKey
-	if serverKey == "" {
-		serverKey = DefaultServerKey
-	}
-	gatewayURL := config.GatewayURL
-	if gatewayURL == "" {
-		gatewayURL = MezonGWURL
-	}
+// On registers a handler for an event (see the Event* constants). The payload
+// type depends on the event; for EventChannelMessage it is *ChannelMessage,
+// for other events it is the decoded protobuf message pointer.
+func (c *MezonClient) On(event string, h Handler) { c.events.on(event, h) }
 
-	basePath, err := parseBaseURL(gatewayURL)
-	if err != nil {
-		return nil, &AuthenticationError{Message: "invalid gateway URL: " + err.Error()}
-	}
-	client := NewMezonApi(serverKey, 7*time.Second, basePath)
-
-	response, err := client.AuthenticateIdToken(ctx, serverKey, "", &ApiAuthenticationIdToken{
-		IDToken:  config.IDToken,
-		UserID:   config.UserID,
-		Username: config.Username,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if response.Token == "" || response.RefreshToken == "" || response.APIURL == "" || response.WSURL == "" || response.UserID == "" {
-		return nil, &AuthenticationError{Message: "invalid authentication response: missing required fields"}
-	}
-
-	session, err := RestoreSession(response.Token, response.RefreshToken, response.APIURL, response.WSURL, true)
-	if err != nil {
-		return nil, err
-	}
-	apiBase, err := parseBaseURL(response.APIURL)
-	if err != nil {
-		return nil, &AuthenticationError{Message: "invalid api_url in authentication response: " + err.Error()}
-	}
-	client.SetBasePath(apiBase)
-
-	return &LightClient{
-		session: session,
-		client:  client,
-		userID:  response.UserID,
-	}, nil
-}
-
-// AuthenticateBot authenticates a bot (app) with its bot ID and API key from
-// the Mezon developer portal, mirroring SessionManager.authenticate in the
-// TypeScript mezon-sdk.
-func AuthenticateBot(ctx context.Context, config AuthenticateBotConfig) (*LightClient, error) {
-	if config.BotID == "" || config.APIKey == "" {
-		return nil, &AuthenticationError{Message: "missing required fields: BotID and APIKey are required"}
-	}
-	gatewayURL := config.GatewayURL
-	if gatewayURL == "" {
-		gatewayURL = MezonGWURL
-	}
-
-	basePath, err := parseBaseURL(gatewayURL)
-	if err != nil {
-		return nil, &AuthenticationError{Message: "invalid gateway URL: " + err.Error()}
-	}
-	// The API key doubles as the basic-auth username for session refreshes.
-	client := NewMezonApi(config.APIKey, 7*time.Second, basePath)
-
-	apiSession, err := client.AuthenticateApp(ctx, config.APIKey, "", &ApiAuthenticateAppRequest{
-		Account: ApiAppAccount{AppID: config.BotID, Token: config.APIKey},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if apiSession.Token == "" || apiSession.RefreshToken == "" {
-		return nil, &AuthenticationError{Message: "invalid authentication response: missing tokens"}
-	}
-
-	apiURL := apiSession.APIURL
-	if apiURL == "" {
-		apiURL = gatewayURL
-	}
-	wsURL := apiSession.WsURL
-	if wsURL == "" {
-		wsURL = MezonWSHost
-	}
-
-	session, err := RestoreSession(apiSession.Token, apiSession.RefreshToken, apiURL, wsURL, true)
-	if err != nil {
-		return nil, err
-	}
-	apiBase, err := parseBaseURL(apiURL)
-	if err != nil {
-		return nil, &AuthenticationError{Message: "invalid api_url in authentication response: " + err.Error()}
-	}
-	client.SetBasePath(apiBase)
-
-	userID := apiSession.UserID
-	if userID == "" || userID == "0" {
-		userID = session.UserID // fall back to the JWT uid claim
-	}
-
-	return &LightClient{
-		session: session,
-		client:  client,
-		userID:  userID,
-	}, nil
-}
-
-// UserID returns the current user ID.
-func (c *LightClient) UserID() string { return c.userID }
-
-// Session returns the underlying Mezon session.
-func (c *LightClient) Session() *Session { return c.session }
-
-// Client returns the underlying Mezon API client.
-func (c *LightClient) Client() *MezonApi { return c.client }
-
-// CreateDM creates a direct message channel with a single user.
-func (c *LightClient) CreateDM(ctx context.Context, peerID string) (*ApiChannelDescription, error) {
-	return c.client.CreateChannelDesc(ctx, c.session.Token, &ApiCreateChannelDescRequest{
-		Type:           ChannelTypeDM,
-		ChannelPrivate: 1,
-		UserIDs:        []string{peerID},
+// OnChannelMessage registers a handler for inbound chat messages.
+func (c *MezonClient) OnChannelMessage(h func(*ChannelMessage)) {
+	c.events.on(EventChannelMessage, func(p any) {
+		if m, ok := p.(*ChannelMessage); ok {
+			h(m)
+		}
 	})
 }
 
-// CreateGroupDM creates a group direct message channel with multiple users.
-func (c *LightClient) CreateGroupDM(ctx context.Context, userIDs []string) (*ApiChannelDescription, error) {
-	if len(userIDs) == 0 {
-		return nil, &SessionError{Message: "at least one user ID is required for a group DM"}
+// OnReady registers a handler invoked once the client has logged in and joined.
+func (c *MezonClient) OnReady(h func()) {
+	c.events.on(EventReady, func(any) { h() })
+}
+
+func (c *MezonClient) initManagers(basePath string, session *Session) {
+	c.apiClient = NewMezonApi(c.Token, basePath, c.Timeout)
+	wsURL := ""
+	if session != nil {
+		wsURL = session.WsURL
 	}
-	return c.client.CreateChannelDesc(ctx, c.session.Token, &ApiCreateChannelDescRequest{
-		Type:           ChannelTypeGroup,
-		ChannelPrivate: 1,
-		UserIDs:        userIDs,
-	})
+	c.socket = NewDefaultSocket(wsURL, c.Host, c.Port, c.UseSSL, c.events.emit)
+	c.socket.OnDisconnect = func(reason string) {
+		if c.hardDisconnect {
+			return
+		}
+		go c.retryConnect()
+	}
+	c.channelManager = newChannelManager(c.apiClient, c.socket, c)
+	c.bindInternalListeners()
 }
 
-// ListClanUsers lists all users that are members of a clan.
-//
-// Note: bot sessions are not permitted to call this (the gateway answers
-// HTTP 403); bots learn member names from incoming channel messages instead.
-func (c *LightClient) ListClanUsers(ctx context.Context, clanID string) (*ApiClanUserList, error) {
-	return c.client.ListClanUsers(ctx, c.session.Token, clanID)
-}
-
-// GetClanUser finds a clan member by user ID. It returns nil if the user is
-// not a member of the clan.
-func (c *LightClient) GetClanUser(ctx context.Context, clanID, userID string) (*ApiClanUser, error) {
-	list, err := c.ListClanUsers(ctx, clanID)
+// Login authenticates the bot, connects the socket and joins all clans, port of
+// MezonClientCore.login/handleClientLogin. It returns once the client is ready.
+func (c *MezonClient) Login() error {
+	c.hardDisconnect = false
+	tempApi := NewMezonApi(c.Token, c.loginBasePath, c.Timeout)
+	sessApi, err := tempApi.MezonAuthenticate(c.ClientID, c.Token)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	for _, cu := range list.ClanUsers {
-		if cu.User != nil && cu.User.ID == userID {
-			return cu, nil
+	if sessApi == nil || sessApi.Token == "" {
+		return errors.New("authenticate returned empty session")
+	}
+	session, err := NewSession(sessApi.Token, sessApi.RefreshToken, itoaID(sessApi.UserId), sessApi.ApiUrl, sessApi.IdToken, sessApi.WsUrl)
+	if err != nil {
+		return err
+	}
+	c.session = session
+
+	basePath := c.loginBasePath
+	if sessApi.ApiUrl != "" {
+		host, port, useSSL, perr := ParseURLToHostAndSSL(sessApi.ApiUrl)
+		if perr == nil {
+			c.Host, c.Port, c.UseSSL = host, port, useSSL
+			scheme := "http://"
+			if useSSL {
+				scheme = "https://"
+			}
+			basePath = scheme + host + ":" + port
 		}
 	}
-	return nil, nil
+	c.initManagers(basePath, session)
+
+	if err := c.socket.Connect(session, true); err != nil {
+		return err
+	}
+	if err := c.connectSocket(session.Token); err != nil {
+		return err
+	}
+	if err := c.channelManager.InitAllDMChannels(session.Token); err != nil {
+		// non-fatal, mirror TS which logs and continues
+		log.Printf("mezon: InitAllDMChannels failed: %v", err)
+	}
+	c.events.emit(EventReady, nil)
+	return nil
 }
 
-// GetChannelDetail fetches the description of a single channel.
-//
-// Note: bot sessions are not permitted to call this (HTTP 403).
-func (c *LightClient) GetChannelDetail(ctx context.Context, channelID string) (*ApiChannelDescription, error) {
-	return c.client.GetChannelDetail(ctx, c.session.Token, channelID)
+// connectSocket joins clan chats and builds Clan objects, port of
+// socket_manager.connectSocket.
+func (c *MezonClient) connectSocket(sessionToken string) error {
+	clans, err := c.apiClient.ListClanDescs(sessionToken, 0, 0, "")
+	if err != nil {
+		return err
+	}
+	type clanInfo struct {
+		id, name, welcome string
+	}
+	list := make([]clanInfo, 0)
+	for _, cl := range clans.GetClandesc() {
+		list = append(list, clanInfo{itoaID(cl.ClanId), cl.ClanName, itoaID(cl.WelcomeChannelId)})
+	}
+	list = append(list, clanInfo{"0", "", ""}) // global / DM pseudo-clan
+	for _, cl := range list {
+		if _, err := c.socket.JoinClanChat(cl.id); err != nil {
+			// TS aborts connectSocket on a join failure; we log and continue
+			// joining the rest so one bad clan does not block the whole bot.
+			log.Printf("mezon: JoinClanChat(%s) failed: %v", cl.id, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if _, ok := c.Clans.Get(cl.id); !ok {
+			clanObj := newClan(cl.id, orString(cl.name, "unknown"), cl.welcome, cl.name, c, sessionToken)
+			c.Clans.Set(cl.id, clanObj)
+		}
+	}
+	return nil
 }
 
-// ListChannelDescs lists the channels visible to the current user/bot.
-//
-// Note: bot sessions are not permitted to call this (HTTP 403).
-func (c *LightClient) ListChannelDescs(ctx context.Context, req *proto.ListChannelDescsRequest) (*proto.ChannelDescList, error) {
-	return c.client.ListChannelDescs(ctx, c.session.Token, req)
+func (c *MezonClient) retryConnect() {
+	c.mu.Lock()
+	if c.reconnecting || c.hardDisconnect {
+		c.mu.Unlock()
+		return
+	}
+	c.reconnecting = true
+	c.mu.Unlock()
+
+	delay := 5 * time.Second
+	const maxDelay = 60 * time.Second
+	for !c.hardDisconnect {
+		time.Sleep(delay)
+		if c.session == nil {
+			break
+		}
+		if err := c.socket.Connect(c.session, true); err == nil {
+			if err := c.connectSocket(c.session.Token); err == nil {
+				break
+			} else {
+				log.Printf("mezon: reconnect connectSocket failed: %v", err)
+			}
+		} else {
+			log.Printf("mezon: reconnect dial failed, retrying in %s: %v", delay*2, err)
+		}
+		if delay = delay * 2; delay > maxDelay {
+			delay = maxDelay
+		}
+	}
+	c.mu.Lock()
+	c.reconnecting = false
+	c.mu.Unlock()
 }
 
-// ListChannelUsers lists all users that are members of a channel.
-//
-// Note: bot sessions are not permitted to call this (HTTP 403).
-func (c *LightClient) ListChannelUsers(ctx context.Context, clanID, channelID string, channelType int32) (*ApiChannelUserList, error) {
-	return c.client.ListChannelUsers(ctx, c.session.Token, &proto.ListChannelUsersRequest{
-		ClanID:      clanID,
-		ChannelID:   channelID,
-		ChannelType: channelType,
-	})
+// Close shuts down the socket and prevents reconnection.
+func (c *MezonClient) Close() {
+	c.hardDisconnect = true
+	if c.socket != nil {
+		c.socket.Close()
+	}
 }
 
-// GetChannelUser finds a channel member by user ID. It returns nil if the
-// user is not a member of the channel.
-func (c *LightClient) GetChannelUser(ctx context.Context, clanID, channelID string, channelType int32, userID string) (*ApiChannelUser, error) {
-	list, err := c.ListChannelUsers(ctx, clanID, channelID, channelType)
+// Socket returns the underlying socket for advanced/raw realtime calls.
+func (c *MezonClient) Socket() *DefaultSocket { return c.socket }
+
+// ChannelManager returns the DM channel manager.
+func (c *MezonClient) ChannelManager() *ChannelManager { return c.channelManager }
+
+func (c *MezonClient) fetchChannel(id string) (*TextChannel, error) {
+	if c.session == nil {
+		return nil, ErrNotFound
+	}
+	detail, err := c.apiClient.ListChannelDetail(c.session.Token, id)
 	if err != nil {
 		return nil, err
 	}
-	for _, cu := range list.ChannelUsers {
-		if cu.UserID == userID {
-			return cu, nil
+	clanID := itoaID(detail.ClanId)
+	clan, ok := c.Clans.Get(clanID)
+	if !ok || clan == nil {
+		// Fall back to (or create) the pseudo-clan so channel/message helpers
+		// always have a non-nil Clan (DM channels report clan_id "0").
+		token := ""
+		if c.session != nil {
+			token = c.session.Token
 		}
+		clan = newClan(clanID, "unknown", "", "", c, token)
+		c.Clans.Set(clanID, clan)
 	}
-	return nil, nil
+	channel := newTextChannel(detail, clan, c.socket, c.queue)
+	c.Channels.Set(channel.ID, channel)
+	if clan != nil {
+		clan.Channels.Set(channel.ID, channel)
+	}
+	return channel, nil
 }
 
-// UploadAttachment uploads an attachment file to the Mezon server and
-// returns the URL of the uploaded file, which can be used in messages.
-func (c *LightClient) UploadAttachment(ctx context.Context, request *ApiUploadAttachmentRequest) (*ApiUploadAttachment, error) {
-	return c.client.UploadAttachmentFile(ctx, c.session.Token, request)
+func (c *MezonClient) fetchUser(id string) (*User, error) {
+	if c.session == nil {
+		return nil, ErrNotFound
+	}
+	dm, err := c.channelManager.CreateDMChannel(id)
+	if err != nil || dm == nil {
+		return nil, ErrNotFound
+	}
+	u := &User{
+		ID:             id,
+		DmChannelID:    itoaID(dm.ChannelId),
+		socket:         c.socket,
+		queue:          c.queue,
+		channelManager: c.channelManager,
+	}
+	c.Users.Set(id, u)
+	return u, nil
 }
 
-// RefreshSession refreshes the current session using the refresh token.
-// Call this before the session expires to maintain connectivity. Concurrent
-// callers share a single in-flight refresh.
-func (c *LightClient) RefreshSession(ctx context.Context) (*Session, error) {
-	if c.session.Created && c.session.ExpiresAt-c.session.CreatedAt < 70 {
-		log.Println("Session lifetime too short, please set '--session.token_expiry_sec' option. See the documentation for more info: https://mezon.vn/docs/mezon/getting-started/configuration/#session")
+func orString(v, fallback string) string {
+	if v == "" {
+		return fallback
 	}
-	if c.session.Created && c.session.RefreshExpiresAt-c.session.CreatedAt < 3700 {
-		log.Println("Session refresh lifetime too short, please set '--session.refresh_token_expiry_sec' option. See the documentation for more info: https://mezon.vn/docs/mezon/getting-started/configuration/#session")
-	}
-
-	c.refreshMu.Lock()
-	if c.refreshDone != nil {
-		done := c.refreshDone
-		c.refreshMu.Unlock()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-		c.refreshMu.Lock()
-		err := c.refreshErr
-		c.refreshMu.Unlock()
-		return c.session, err
-	}
-	done := make(chan struct{})
-	c.refreshDone = done
-	c.refreshMu.Unlock()
-
-	serverKey := c.client.ServerKey
-	if serverKey == "" {
-		serverKey = DefaultServerKey
-	}
-	apiSession, err := c.client.SessionRefresh(ctx, serverKey, "", &ApiSessionRefreshRequest{
-		Token:      c.session.RefreshToken,
-		Vars:       c.session.Vars,
-		IsRemember: c.session.IsRemember,
-	})
-	if err == nil {
-		err = c.session.Update(apiSession.Token, apiSession.RefreshToken, apiSession.IsRemember)
-		if err == nil && c.OnRefreshSession != nil {
-			c.OnRefreshSession(apiSession)
-		}
-	}
-	if err != nil {
-		log.Printf("Session refresh failed: %v", err)
-	}
-
-	c.refreshMu.Lock()
-	c.refreshErr = err
-	c.refreshDone = nil
-	close(done)
-	c.refreshMu.Unlock()
-
-	return c.session, err
-}
-
-// CreateSocket creates a socket with the client's configuration.
-func (c *LightClient) CreateSocket(verbose bool) *DefaultSocket {
-	return NewDefaultSocket(c.session.WSURL, "443", true, verbose)
-}
-
-// IsSessionExpired reports whether the current session token has expired.
-func (c *LightClient) IsSessionExpired() bool {
-	return c.session.IsExpired(time.Now())
-}
-
-// IsRefreshSessionExpired reports whether the refresh token has expired. If
-// it returns true, the user needs to re-authenticate.
-func (c *LightClient) IsRefreshSessionExpired() bool {
-	return c.session.IsRefreshExpired(time.Now())
-}
-
-// Token returns the authentication token for external use.
-func (c *LightClient) Token() string { return c.session.Token }
-
-// RefreshToken returns the refresh token for storage.
-func (c *LightClient) RefreshToken() string { return c.session.RefreshToken }
-
-// ExportSession exports session data for storage and later restoration via
-// InitClient.
-func (c *LightClient) ExportSession() ClientInitConfig {
-	return ClientInitConfig{
-		Token:        c.session.Token,
-		RefreshToken: c.session.RefreshToken,
-		APIURL:       c.session.APIURL,
-		WSURL:        c.session.WSURL,
-		UserID:       c.userID,
-	}
+	return v
 }

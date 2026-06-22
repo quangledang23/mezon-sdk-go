@@ -1,124 +1,145 @@
-package mezonlightsdk
+package mezon
 
 import (
-	"github.com/quangledang23/mezon-sdk-go/proto"
+	"strconv"
+
+	"github.com/quangledang23/mezon-sdk-go/api"
 )
 
-// Aliases re-exporting the wire-level types used in the public API, mirroring
-// the Api* names of the TypeScript mezon-sdk.
-type (
-	ApiSession                  = proto.Session
-	ApiSessionRefreshRequest    = proto.SessionRefreshRequest
-	ApiChannelDescription       = proto.ChannelDescription
-	ApiCreateChannelDescRequest = proto.CreateChannelDescRequest
-	ApiMessageAttachment        = proto.MessageAttachment
-	ApiMessageMention           = proto.MessageMention
-	ApiUploadAttachment         = proto.UploadAttachment
-	ApiUploadAttachmentRequest  = proto.UploadAttachmentRequest
-	ApiUser                     = proto.User
-	ApiClanUser                 = proto.ClanUser
-	ApiClanUserList             = proto.ClanUserList
-	ApiChannelUser              = proto.ChannelUser
-	ApiChannelUserList          = proto.ChannelUserList
-)
-
-// ClientInitConfig configures a LightClient created from existing tokens.
-type ClientInitConfig struct {
-	// Token is the authentication token.
-	Token string `json:"token"`
-	// RefreshToken is used for session renewal.
-	RefreshToken string `json:"refresh_token"`
-	// APIURL is the API URL for the Mezon server.
-	APIURL string `json:"api_url"`
-	// WSURL is the WebSocket host for session connectivity.
-	WSURL string `json:"ws_url"`
-	// UserID is the user ID associated with the session.
-	UserID string `json:"user_id"`
-	// ServerKey is the server key for authentication (optional, uses
-	// DefaultServerKey if empty).
-	ServerKey string `json:"serverkey,omitempty"`
+// Mention is a user/role mention with UTF-16 start/end offsets into the message
+// text (S/E). The Mezon clients compute these offsets in UTF-16 code units; use
+// MentionSpan to derive them from text so they line up across clients.
+type Mention struct {
+	UserID            string `json:"user_id,omitempty"`
+	RoleID            string `json:"role_id,omitempty"`
+	Username          string `json:"username,omitempty"`
+	Rolename          string `json:"rolename,omitempty"`
+	S                 int    `json:"s"`
+	E                 int    `json:"e"`
+	CreateTimeSeconds uint32 `json:"create_time_seconds,omitempty"`
 }
 
-// AuthenticateConfig configures authentication of a new user.
-type AuthenticateConfig struct {
-	// IDToken is the ID token from an identity provider.
-	IDToken string `json:"id_token"`
-	// UserID is the user ID to associate with the account.
-	UserID string `json:"user_id"`
-	// Username is the username for the account.
-	Username string `json:"username"`
-	// ServerKey is the server key for authentication (optional).
-	ServerKey string `json:"serverkey,omitempty"`
-	// GatewayURL is a custom gateway URL (optional, uses MezonGWURL if empty).
-	GatewayURL string `json:"gateway_url,omitempty"`
+// Attachment is a message attachment.
+type Attachment struct {
+	Filename  string `json:"filename,omitempty"`
+	Size      int    `json:"size,omitempty"`
+	URL       string `json:"url,omitempty"`
+	Filetype  string `json:"filetype,omitempty"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
+	Thumbnail string `json:"thumbnail,omitempty"`
+	Duration  int    `json:"duration,omitempty"`
 }
 
-// SendMessagePayload describes a message to send.
-type SendMessagePayload struct {
-	// ChannelID is the channel to send the message to.
-	ChannelID string
-	// Content is the message content; it is JSON-encoded before sending.
-	// Plain strings and {"t": ...} maps get "lk" markup added automatically
-	// for any URLs so clients render them as clickable links.
-	Content any
-	// Mentions holds user/role mention entries pointing into the content
-	// text (see ContentBuilder).
-	Mentions []*ApiMessageMention
-	// Attachments holds optional file/media attachments.
-	Attachments []*ApiMessageAttachment
-	// MentionEveryone notifies everyone in the channel.
-	MentionEveryone bool
-	// HideLink, when true, leaves URLs in the content as plain text instead
-	// of marking them up as clickable links.
-	HideLink bool
-	// Code is the optional message code.
-	Code int32
+// MessageRef references another message (used for replies/quotes).
+type MessageRef struct {
+	MessageID                string `json:"message_id,omitempty"`
+	MessageRefID             string `json:"message_ref_id,omitempty"`
+	Content                  string `json:"content,omitempty"`
+	HasAttachment            bool   `json:"has_attachment,omitempty"`
+	RefType                  int    `json:"ref_type,omitempty"`
+	MessageSenderID          string `json:"message_sender_id,omitempty"`
+	MessageSenderUsername    string `json:"message_sender_username,omitempty"`
+	MessageSenderAvatar      string `json:"message_sender_avatar,omitempty"`
+	MessageSenderClanNick    string `json:"message_sender_clan_nick,omitempty"`
+	MessageSenderDisplayName string `json:"message_sender_display_name,omitempty"`
 }
 
-// AuthenticateBotConfig configures authentication of a bot (app) using the
-// bot ID and API key from the Mezon developer portal.
-type AuthenticateBotConfig struct {
-	// BotID is the application/bot ID.
-	BotID string `json:"bot_id"`
-	// APIKey is the bot token from the developer portal.
-	APIKey string `json:"api_key"`
-	// GatewayURL is a custom gateway URL (optional, uses MezonGWURL if empty).
-	GatewayURL string `json:"gateway_url,omitempty"`
+// Reaction is a message reaction.
+type Reaction struct {
+	ID              string `json:"id,omitempty"`
+	EmojiID         string `json:"emoji_id,omitempty"`
+	Emoji           string `json:"emoji,omitempty"`
+	SenderID        string `json:"sender_id,omitempty"`
+	SenderName      string `json:"sender_name,omitempty"`
+	Action          bool   `json:"action,omitempty"`
+	Count           int    `json:"count,omitempty"`
+	MessageSenderID string `json:"message_sender_id,omitempty"`
 }
 
-// ApiAppAccount identifies a bot/app in an authentication request.
-type ApiAppAccount struct {
-	// AppID is the application/bot ID.
-	AppID string `json:"appid"`
-	// Token is the bot API key.
-	Token string `json:"token"`
+// ReactPayload is the input to Message.React.
+type ReactPayload struct {
+	ID           string
+	EmojiID      string
+	Emoji        string
+	Count        int
+	ActionDelete bool
 }
 
-// ApiAuthenticateAppRequest is the request body for bot/app authentication.
-type ApiAuthenticateAppRequest struct {
-	Account ApiAppAccount `json:"account"`
+// --- conversions to the protobuf wire types used by the socket -------------
+
+func atoiID(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	v, _ := strconv.ParseInt(s, 10, 64)
+	return v
 }
 
-// ApiAuthenticationIdToken is the request body for ID-token authentication.
-type ApiAuthenticationIdToken struct {
-	// IDToken is the ID token from an identity provider.
-	IDToken string `json:"id_token"`
-	// UserID is the user ID associated with the token.
-	UserID string `json:"user_id"`
-	// Username is the username associated with the token.
-	Username string `json:"username"`
+func itoaID(v int64) string {
+	if v == 0 {
+		return "0"
+	}
+	return strconv.FormatInt(v, 10)
 }
 
-// AuthenticationIdTokenResponse is the response of ID-token authentication.
-type AuthenticationIdTokenResponse struct {
-	// Token is the authentication token.
-	Token string `json:"token"`
-	// RefreshToken is used for session renewal.
-	RefreshToken string `json:"refresh_token"`
-	// APIURL is the API URL for the authenticated user.
-	APIURL string `json:"api_url"`
-	// WSURL is the WS host for the authenticated user.
-	WSURL string `json:"ws_url"`
-	// UserID is the user ID of the authenticated user.
-	UserID string `json:"user_id"`
+func mentionsToProto(ms []Mention) []*api.MessageMention {
+	if len(ms) == 0 {
+		return nil
+	}
+	out := make([]*api.MessageMention, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, &api.MessageMention{
+			UserId:            atoiID(m.UserID),
+			RoleId:            atoiID(m.RoleID),
+			Username:          m.Username,
+			Rolename:          m.Rolename,
+			S:                 int32(m.S),
+			E:                 int32(m.E),
+			CreateTimeSeconds: m.CreateTimeSeconds,
+		})
+	}
+	return out
+}
+
+func attachmentsToProto(as []Attachment) []*api.MessageAttachment {
+	if len(as) == 0 {
+		return nil
+	}
+	out := make([]*api.MessageAttachment, 0, len(as))
+	for _, a := range as {
+		out = append(out, &api.MessageAttachment{
+			Filename:  a.Filename,
+			Size:      int32(a.Size),
+			Url:       a.URL,
+			Filetype:  a.Filetype,
+			Width:     int32(a.Width),
+			Height:    int32(a.Height),
+			Thumbnail: a.Thumbnail,
+			Duration:  int32(a.Duration),
+		})
+	}
+	return out
+}
+
+func refsToProto(rs []MessageRef) []*api.MessageRef {
+	if len(rs) == 0 {
+		return nil
+	}
+	out := make([]*api.MessageRef, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, &api.MessageRef{
+			MessageId:                atoiID(r.MessageID),
+			MessageRefId:             atoiID(r.MessageRefID),
+			Content:                  r.Content,
+			HasAttachment:            r.HasAttachment,
+			RefType:                  int32(r.RefType),
+			MessageSenderId:          atoiID(r.MessageSenderID),
+			MessageSenderUsername:    r.MessageSenderUsername,
+			MessageSenderAvatar:      r.MessageSenderAvatar,
+			MessageSenderClanNick:    r.MessageSenderClanNick,
+			MessageSenderDisplayName: r.MessageSenderDisplayName,
+		})
+	}
+	return out
 }
