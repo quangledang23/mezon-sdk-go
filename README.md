@@ -76,6 +76,45 @@ Register with `client.On(mezon.Event<Name>, handler)` or the typed
 `*mezon.ChannelMessage` (content/mentions/reactions parsed); other events deliver
 the decoded protobuf message pointer from the `rtapi`/`api` packages.
 
+## Caching and shared state across instances
+
+The client keeps in-memory caches (`client.Clans`, `client.Channels`,
+`client.Users`, and each channel's `Messages`), a port of the TS `CacheManager`.
+A miss falls back to a `fetcher` (REST), and inbound messages keep cached
+users/channels fresh. The `Users` and `Channels` caches are bounded
+(`ClientConfig.MaxUsersCache` / `MaxChannelsCache`, default 5000) so a
+long-running bot does not grow unboundedly.
+
+For **multiple bot instances**, plug in an L2 store shared across replicas so
+they don't each refetch channel/user metadata from REST. Implement
+`mezon.SharedStore` (Get/Set/Delete of `[]byte` with a TTL) and pass it as
+`ClientConfig.Store`; the L1 in-memory caches still hold the live objects, while
+the store only holds the serializable data needed to rebuild them. Lookups go
+L1 → L2 (store) → REST, populating both on the way back, and channel
+update/delete events invalidate the store entry.
+
+A ready-made Redis adapter lives in the **separate `redisstore` module** (so the
+core SDK stays free of a Redis dependency):
+
+```go
+import (
+    "github.com/redis/go-redis/v9"
+    "github.com/quangledang23/mezon-sdk-go/redisstore"
+)
+
+rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+client, _ := mezon.NewMezonClient(mezon.ClientConfig{
+    BotID:    os.Getenv("MEZON_BOT_ID"),
+    Token:    os.Getenv("MEZON_BOT_TOKEN"),
+    Store:    redisstore.New(rdb, redisstore.WithPrefix("bot1:")),
+    CacheTTL: 10 * time.Minute,
+})
+```
+
+```bash
+go get github.com/quangledang23/mezon-sdk-go/redisstore
+```
+
 ## Protobuf code generation
 
 `api/*.pb.go` and `rtapi/*.pb.go` are generated, not hand-written. The `.proto`

@@ -23,6 +23,19 @@ type ClientConfig struct {
 	Port    string
 	UseSSL  *bool // nil => default (true)
 	Timeout time.Duration
+
+	// Store, when non-nil, is an L2 cache shared across bot instances (e.g.
+	// Redis). Channel and user lookups consult it before hitting the REST API
+	// and populate it on a miss, so replicas avoid redundant REST calls. The
+	// in-memory caches remain the L1 (live objects); Store only holds the
+	// serializable data needed to rebuild them. nil => in-memory only.
+	Store SharedStore
+	// CacheTTL bounds how long entries live in Store (<= 0 => 5 minutes).
+	CacheTTL time.Duration
+	// MaxUsersCache / MaxChannelsCache bound the in-memory L1 caches so a
+	// long-running bot does not grow unboundedly (<= 0 => 5000 each).
+	MaxUsersCache    int
+	MaxChannelsCache int
 }
 
 // MezonClient is the high-level Mezon bot client, port of MezonClient +
@@ -47,6 +60,8 @@ type MezonClient struct {
 	session        *Session
 	queue          *AsyncThrottleQueue
 	events         *emitter
+	store          SharedStore
+	cacheTTL       time.Duration
 
 	mu             sync.Mutex
 	internalsBound bool
@@ -82,6 +97,18 @@ func NewMezonClient(cfg ClientConfig) (*MezonClient, error) {
 	if useSSL {
 		scheme = "https://"
 	}
+	cacheTTL := cfg.CacheTTL
+	if cacheTTL <= 0 {
+		cacheTTL = defaultCacheTTL
+	}
+	maxUsers := cfg.MaxUsersCache
+	if maxUsers <= 0 {
+		maxUsers = defaultMaxCache
+	}
+	maxChannels := cfg.MaxChannelsCache
+	if maxChannels <= 0 {
+		maxChannels = defaultMaxCache
+	}
 	c := &MezonClient{
 		Token:         cfg.Token,
 		ClientID:      cfg.BotID,
@@ -92,10 +119,12 @@ func NewMezonClient(cfg ClientConfig) (*MezonClient, error) {
 		loginBasePath: scheme + host + ":" + port,
 		queue:         NewAsyncThrottleQueue(0),
 		events:        newEmitter(),
+		store:         cfg.Store,
+		cacheTTL:      cacheTTL,
 	}
 	c.Clans = NewCacheManager[string, *Clan](func(string) (*Clan, error) { return nil, ErrNotFound }, 0)
-	c.Channels = NewCacheManager[string, *TextChannel](c.fetchChannel, 0)
-	c.Users = NewCacheManager[string, *User](c.fetchUser, 0)
+	c.Channels = NewCacheManager[string, *TextChannel](c.fetchChannel, maxChannels)
+	c.Users = NewCacheManager[string, *User](c.fetchUser, maxUsers)
 	return c, nil
 }
 
@@ -258,53 +287,6 @@ func (c *MezonClient) Socket() *DefaultSocket { return c.socket }
 
 // ChannelManager returns the DM channel manager.
 func (c *MezonClient) ChannelManager() *ChannelManager { return c.channelManager }
-
-func (c *MezonClient) fetchChannel(id string) (*TextChannel, error) {
-	if c.session == nil {
-		return nil, ErrNotFound
-	}
-	detail, err := c.apiClient.ListChannelDetail(c.session.Token, id)
-	if err != nil {
-		return nil, err
-	}
-	clanID := itoaID(detail.ClanId)
-	clan, ok := c.Clans.Get(clanID)
-	if !ok || clan == nil {
-		// Fall back to (or create) the pseudo-clan so channel/message helpers
-		// always have a non-nil Clan (DM channels report clan_id "0").
-		token := ""
-		if c.session != nil {
-			token = c.session.Token
-		}
-		clan = newClan(clanID, "unknown", "", "", c, token)
-		c.Clans.Set(clanID, clan)
-	}
-	channel := newTextChannel(detail, clan, c.socket, c.queue)
-	c.Channels.Set(channel.ID, channel)
-	if clan != nil {
-		clan.Channels.Set(channel.ID, channel)
-	}
-	return channel, nil
-}
-
-func (c *MezonClient) fetchUser(id string) (*User, error) {
-	if c.session == nil {
-		return nil, ErrNotFound
-	}
-	dm, err := c.channelManager.CreateDMChannel(id)
-	if err != nil || dm == nil {
-		return nil, ErrNotFound
-	}
-	u := &User{
-		ID:             id,
-		DmChannelID:    itoaID(dm.ChannelId),
-		socket:         c.socket,
-		queue:          c.queue,
-		channelManager: c.channelManager,
-	}
-	c.Users.Set(id, u)
-	return u, nil
-}
 
 func orString(v, fallback string) string {
 	if v == "" {

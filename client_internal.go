@@ -20,6 +20,19 @@ func (c *MezonClient) bindInternalListeners() {
 		if e, ok := p.(*rtapi.ChannelDeletedEvent); ok {
 			channelID := itoaID(e.ChannelId)
 			c.Channels.Delete(channelID)
+			c.l2Delete(l2ChannelPrefix + channelID)
+			if clan, ok := c.Clans.Get(itoaID(e.ClanId)); ok {
+				clan.Channels.Delete(channelID)
+			}
+		}
+	})
+	c.events.on(EventChannelUpdated, func(p any) {
+		if e, ok := p.(*rtapi.ChannelUpdatedEvent); ok {
+			// Drop the stale entry from both tiers so the next fetch reloads
+			// fresh detail from REST and repopulates the shared store.
+			channelID := itoaID(e.ChannelId)
+			c.Channels.Delete(channelID)
+			c.l2Delete(l2ChannelPrefix + channelID)
 			if clan, ok := c.Clans.Get(itoaID(e.ClanId)); ok {
 				clan.Channels.Delete(channelID)
 			}
