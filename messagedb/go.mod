@@ -3,7 +3,7 @@ module github.com/quangledang23/mezon-sdk-go/messagedb
 go 1.26.4
 
 require (
-	github.com/quangledang23/mezon-sdk-go v0.2.0
+	github.com/quangledang23/mezon-sdk-go v0.1.2
 	modernc.org/sqlite v1.34.4
 )
 
