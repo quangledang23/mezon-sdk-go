@@ -1,6 +1,10 @@
 package mezon
 
-import "github.com/quangledang23/mezon-sdk-go/rtapi"
+import (
+	"log"
+
+	"github.com/quangledang23/mezon-sdk-go/rtapi"
+)
 
 // bindInternalListeners wires the cache-maintenance handlers, port of
 // MezonClient._setupInternalListeners. These run before user handlers.
@@ -43,6 +47,13 @@ func (c *MezonClient) bindInternalListeners() {
 // cacheChannelMessage stores an inbound message in its channel cache, port of
 // _initChannelMessageCache (best-effort; errors are swallowed like the TS).
 func (c *MezonClient) cacheChannelMessage(e *ChannelMessage) {
+	// Persist to the optional message store first, matching the TS which calls
+	// messageDB.saveMessage(e) before the in-memory caching (best-effort).
+	if c.messageDB != nil {
+		if err := c.messageDB.SaveMessage(e); err != nil {
+			log.Printf("mezon: SaveMessage failed: %v", err)
+		}
+	}
 	if e.ClanID != "" && e.ClanID != "0" {
 		if clan, ok := c.Clans.Get(e.ClanID); ok {
 			_ = clan.LoadChannels()

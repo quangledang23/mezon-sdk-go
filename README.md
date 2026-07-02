@@ -1,6 +1,6 @@
 # mezon-go
 
-A Go port of the [mezon-sdk](../mezon-sdk) TypeScript client for the Mezon
+A Go port of the [mezon-sdk](../mezon-js/packages/mezon-sdk) TypeScript client for the Mezon
 server. It speaks the same protobuf-over-WebSocket realtime protocol and the same
 protobuf REST API, so a Go bot behaves like a JS bot.
 
@@ -115,6 +115,38 @@ client, _ := mezon.NewMezonClient(mezon.ClientConfig{
 go get github.com/quangledang23/mezon-sdk-go/redisstore
 ```
 
+### Persistent message store
+
+By default a channel's `Messages` cache is in-memory and bounded (200 entries
+per channel). To persist inbound messages so lookups survive restarts and
+eviction, implement `mezon.MessageStore` (`SaveMessage` / `GetMessageByID`) and
+pass it as `ClientConfig.MessageStore`. Every inbound message is saved, and a
+channel's `Messages.Fetch` falls back to the store on a miss.
+
+A ready-made SQLite adapter (a port of the TS SDK's `MessageDatabase`) lives in
+the **separate `messagedb` module**, using the pure-Go `modernc.org/sqlite`
+driver (no cgo):
+
+```go
+import "github.com/quangledang23/mezon-sdk-go/messagedb"
+
+db, err := messagedb.New("") // "" => ./mezon-cache/mezon-messages-cache.db
+if err != nil {
+    log.Fatal(err)
+}
+defer db.Close()
+
+client, _ := mezon.NewMezonClient(mezon.ClientConfig{
+    BotID:        os.Getenv("MEZON_BOT_ID"),
+    Token:        os.Getenv("MEZON_BOT_TOKEN"),
+    MessageStore: db,
+})
+```
+
+```bash
+go get github.com/quangledang23/mezon-sdk-go/messagedb
+```
+
 ## Protobuf code generation
 
 `api/*.pb.go` and `rtapi/*.pb.go` are generated, not hand-written. The `.proto`
@@ -139,5 +171,7 @@ out of the first port:
   `getZkProofs`, ephemeral keypairs and nonces. Porting requires a Go port of
   that crypto library.
 - **AI-agent SSE stream** — the `EventSourceManager` / agent session events.
-- **Local SQLite message persistence** (`MessageDatabase`); messages are cached
-  in memory only.
+
+Local SQLite message persistence (`MessageDatabase`) is available via the
+optional [`messagedb`](#persistent-message-store) module; without it messages
+are cached in memory only.

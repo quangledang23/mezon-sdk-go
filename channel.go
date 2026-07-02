@@ -1,6 +1,8 @@
 package mezon
 
 import (
+	"encoding/json"
+
 	"github.com/quangledang23/mezon-sdk-go/api"
 	"github.com/quangledang23/mezon-sdk-go/rtapi"
 )
@@ -47,13 +49,32 @@ func newTextChannel(d *api.ChannelDescription, clan *Clan, socket *DefaultSocket
 		socket:       socket,
 		queue:        queue,
 	}
-	c.Messages = NewCacheManager[string, *Message](nil, 200)
+	// The Messages cache falls back to the optional persistent MessageStore on a
+	// miss, port of the TextChannel messages CacheManager fetcher which reads
+	// from messageDB.getMessageById.
+	c.Messages = NewCacheManager[string, *Message](c.loadMessageFromStore, 200)
 	return c
 }
 
+// loadMessageFromStore loads a message from the client's MessageStore, port of
+// the TextChannel.messages fetcher. It returns ErrNotFound when no store is
+// configured or the message is absent.
+func (c *TextChannel) loadMessageFromStore(messageID string) (*Message, error) {
+	if c.Clan == nil || c.Clan.client == nil || c.Clan.client.messageDB == nil {
+		return nil, ErrNotFound
+	}
+	clanID := c.Clan.ID
+	cm, err := c.Clan.client.messageDB.GetMessageByID(messageID, c.ID, clanID)
+	if err != nil || cm == nil {
+		return nil, ErrNotFound
+	}
+	return newMessageFromChannelMessage(cm, c, c.socket, c.queue), nil
+}
+
 // Send sends a message to the channel, port of TextChannel.send. The content is
-// JSON-serialized and length-validated in UTF-16 code units. opts may be nil.
-func (c *TextChannel) Send(content Content, opts *SendOptions) (*rtapi.ChannelMessageAck, error) {
+// JSON-serialized and length-validated in UTF-16 code units. It returns the
+// created Message built from the send ack. opts may be nil.
+func (c *TextChannel) Send(content Content, opts *SendOptions) (*Message, error) {
 	if opts == nil {
 		opts = &SendOptions{}
 	}
@@ -64,6 +85,7 @@ func (c *TextChannel) Send(content Content, opts *SendOptions) (*rtapi.ChannelMe
 	data := ReplyMessageData{
 		ClanID:           clanID,
 		ChannelID:        c.ID,
+		ChannelType:      c.ChannelType,
 		Mode:             int(ConvertChannelTypeToChannelMode(c.ChannelType)),
 		IsPublic:         !c.IsPrivate,
 		Content:          content,
@@ -75,9 +97,55 @@ func (c *TextChannel) Send(content Content, opts *SendOptions) (*rtapi.ChannelMe
 		Code:             opts.Code,
 		TopicID:          opts.TopicID,
 	}
-	return Enqueue(c.queue, func() (*rtapi.ChannelMessageAck, error) {
-		return c.socket.WriteChatMessage(data)
+	return Enqueue(c.queue, func() (*Message, error) {
+		ack, err := c.socket.WriteChatMessage(data)
+		if err != nil {
+			return nil, err
+		}
+		return c.createMessageFromAck(ack, data), nil
 	})
+}
+
+// createMessageFromAck builds and caches a Message from a send ack and the data
+// used to send it, port of TextChannel.createMessageFromAck. The sender is the
+// bot itself.
+func (c *TextChannel) createMessageFromAck(ack *rtapi.ChannelMessageAck, data ReplyMessageData) *Message {
+	channelID := data.ChannelID
+	if ack != nil && ack.ChannelId != 0 {
+		channelID = itoaID(ack.ChannelId)
+	}
+	senderID := ""
+	if c.Clan != nil {
+		senderID = c.Clan.ClientID
+	}
+	msg := &Message{
+		ChannelID:   channelID,
+		ClanID:      data.ClanID,
+		SenderID:    senderID,
+		Mentions:    data.Mentions,
+		Attachments: data.Attachments,
+		References:  data.References,
+		TopicID:     data.TopicID,
+		Mode:        data.Mode,
+		Channel:     c,
+		socket:      c.socket,
+		queue:       c.queue,
+	}
+	if ack != nil {
+		msg.ID = itoaID(ack.MessageId)
+		msg.CreateTimeSeconds = ack.CreateTimeSeconds
+		msg.UpdateTimeSeconds = ack.UpdateTimeSeconds
+		msg.Code = int(ack.Code)
+		msg.Username = ack.Username
+		if ack.Persistent != nil {
+			msg.Persistent = ack.Persistent.Value
+		}
+	}
+	if raw, err := marshalContent(data.Content); err == nil {
+		msg.Content = json.RawMessage(raw)
+	}
+	c.Messages.Set(msg.ID, msg)
+	return msg
 }
 
 // SendEphemeral sends an ephemeral message to the given receivers, port of
@@ -98,6 +166,7 @@ func (c *TextChannel) SendEphemeral(receiverIDs []string, content Content, opts 
 		ReceiverIDs:      receiverIDs,
 		ClanID:           clanID,
 		ChannelID:        c.ID,
+		ChannelType:      c.ChannelType,
 		Mode:             int(ConvertChannelTypeToChannelMode(c.ChannelType)),
 		IsPublic:         !c.IsPrivate,
 		Content:          content,

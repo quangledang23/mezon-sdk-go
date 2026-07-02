@@ -1,9 +1,50 @@
 package mezon
 
 import (
+	"strings"
+
 	"github.com/quangledang23/mezon-sdk-go/api"
 	"github.com/quangledang23/mezon-sdk-go/rtapi"
 )
+
+// isMustJoinChannelError reports whether err is the server's "must join channel
+// before sending messages" rejection (code 3), port of
+// socket_manager.isMustJoinChannelError. The socket surfaces the code and
+// message inside the error string, so we match on the message substring.
+func isMustJoinChannelError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "error 3:") ||
+		strings.Contains(msg, "Must join channel before sending messages")
+}
+
+// getChannelTypeFromMode maps a stream mode to the channel type used when
+// (re)joining a channel, port of socket_manager.getChannelTypeFromMode.
+func getChannelTypeFromMode(mode int) int {
+	switch ChannelStreamMode(mode) {
+	case StreamModeDM:
+		return int(ChannelTypeDM)
+	case StreamModeGroup:
+		return int(ChannelTypeGroup)
+	case StreamModeThread:
+		return int(ChannelTypeThread)
+	default:
+		return int(ChannelTypeChannel)
+	}
+}
+
+// joinChannelBeforeRetry joins the target channel so a subsequent write
+// succeeds, port of socket_manager.joinChannelBeforeRetry. channelType falls
+// back to getChannelTypeFromMode(mode) when unset.
+func (s *DefaultSocket) joinChannelBeforeRetry(clanID, channelID string, channelType, mode int, isPublic bool) error {
+	if channelType == 0 {
+		channelType = getChannelTypeFromMode(mode)
+	}
+	_, err := s.JoinChat(clanID, channelID, channelType, isPublic)
+	return err
+}
 
 // WriteChatMessage sends a chat message, port of socket.writeChatMessage (with
 // the content-length guard from socket_manager.writeChatMessage). Content is
@@ -16,26 +57,37 @@ func (s *DefaultSocket) WriteChatMessage(d ReplyMessageData) (*rtapi.ChannelMess
 	if err := validateContentLength(content); err != nil {
 		return nil, err
 	}
-	env := &rtapi.Envelope{ChannelMessageSend: &rtapi.ChannelMessageSend{
-		ClanId:           atoiID(d.ClanID),
-		ChannelId:        atoiID(d.ChannelID),
-		Mode:             int32(d.Mode),
-		IsPublic:         d.IsPublic,
-		Content:          content,
-		Mentions:         mentionsToProto(d.Mentions),
-		Attachments:      attachmentsToProto(d.Attachments),
-		References:       refsToProto(d.References),
-		AnonymousMessage: d.AnonymousMessage,
-		MentionEveryone:  d.MentionEveryone,
-		Avatar:           d.Avatar,
-		Code:             int32(d.Code),
-		TopicId:          atoiID(d.TopicID),
-	}}
-	resp, err := s.send(env, 0)
-	if err != nil {
-		return nil, err
+	send := func() (*rtapi.ChannelMessageAck, error) {
+		env := &rtapi.Envelope{ChannelMessageSend: &rtapi.ChannelMessageSend{
+			ClanId:           atoiID(d.ClanID),
+			ChannelId:        atoiID(d.ChannelID),
+			Mode:             int32(d.Mode),
+			IsPublic:         d.IsPublic,
+			Content:          content,
+			Mentions:         mentionsToProto(d.Mentions),
+			Attachments:      attachmentsToProto(d.Attachments),
+			References:       refsToProto(d.References),
+			AnonymousMessage: d.AnonymousMessage,
+			MentionEveryone:  d.MentionEveryone,
+			Avatar:           d.Avatar,
+			Code:             int32(d.Code),
+			TopicId:          atoiID(d.TopicID),
+		}}
+		resp, err := s.send(env, 0)
+		if err != nil {
+			return nil, err
+		}
+		return resp.ChannelMessageAck, nil
 	}
-	return resp.ChannelMessageAck, nil
+	// Retry once after joining the channel if the server rejects the write with
+	// "must join channel", port of socket_manager.writeChatMessage.
+	ack, err := send()
+	if err != nil && isMustJoinChannelError(err) {
+		if jerr := s.joinChannelBeforeRetry(d.ClanID, d.ChannelID, d.ChannelType, d.Mode, d.IsPublic); jerr == nil {
+			return send()
+		}
+	}
+	return ack, err
 }
 
 // WriteEphemeralMessage sends an ephemeral message visible only to receivers,
@@ -52,30 +104,41 @@ func (s *DefaultSocket) WriteEphemeralMessage(d EphemeralMessageData) (*api.Chan
 	for _, r := range d.ReceiverIDs {
 		receivers = append(receivers, atoiID(r))
 	}
-	env := &rtapi.Envelope{EphemeralMessageSend: &rtapi.EphemeralMessageSend{
-		ReceiverIds: receivers,
-		Message: &rtapi.ChannelMessageSend{
-			ClanId:           atoiID(d.ClanID),
-			ChannelId:        atoiID(d.ChannelID),
-			Mode:             int32(d.Mode),
-			IsPublic:         d.IsPublic,
-			Content:          content,
-			Mentions:         mentionsToProto(d.Mentions),
-			Attachments:      attachmentsToProto(d.Attachments),
-			References:       refsToProto(d.References),
-			AnonymousMessage: d.AnonymousMessage,
-			MentionEveryone:  d.MentionEveryone,
-			Avatar:           d.Avatar,
-			Code:             int32(d.Code),
-			TopicId:          atoiID(d.TopicID),
-			Id:               atoiID(d.MessageID),
-		},
-	}}
-	resp, err := s.send(env, 0)
-	if err != nil {
-		return nil, err
+	send := func() (*api.ChannelMessage, error) {
+		env := &rtapi.Envelope{EphemeralMessageSend: &rtapi.EphemeralMessageSend{
+			ReceiverIds: receivers,
+			Message: &rtapi.ChannelMessageSend{
+				ClanId:           atoiID(d.ClanID),
+				ChannelId:        atoiID(d.ChannelID),
+				Mode:             int32(d.Mode),
+				IsPublic:         d.IsPublic,
+				Content:          content,
+				Mentions:         mentionsToProto(d.Mentions),
+				Attachments:      attachmentsToProto(d.Attachments),
+				References:       refsToProto(d.References),
+				AnonymousMessage: d.AnonymousMessage,
+				MentionEveryone:  d.MentionEveryone,
+				Avatar:           d.Avatar,
+				Code:             int32(d.Code),
+				TopicId:          atoiID(d.TopicID),
+				Id:               atoiID(d.MessageID),
+			},
+		}}
+		resp, err := s.send(env, 0)
+		if err != nil {
+			return nil, err
+		}
+		return resp.ChannelMessage, nil
 	}
-	return resp.ChannelMessage, nil
+	// Retry once after joining the channel if the server rejects the write with
+	// "must join channel", port of socket_manager.writeEphemeralMessage.
+	msg, err := send()
+	if err != nil && isMustJoinChannelError(err) {
+		if jerr := s.joinChannelBeforeRetry(d.ClanID, d.ChannelID, d.ChannelType, d.Mode, d.IsPublic); jerr == nil {
+			return send()
+		}
+	}
+	return msg, err
 }
 
 // UpdateChatMessage edits a previously sent message, port of socket.updateChatMessage.

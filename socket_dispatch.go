@@ -21,6 +21,8 @@ func (s *DefaultSocket) dispatch(env *rtapi.Envelope) {
 		s.emit(EventChannelDeleted, env.ChannelDeletedEvent)
 	case env.ChannelUpdatedEvent != nil:
 		s.emit(EventChannelUpdated, env.ChannelUpdatedEvent)
+	case env.ChannelArchiveEvent != nil:
+		s.emit(EventChannelArchive, env.ChannelArchiveEvent)
 	case env.UserChannelAddedEvent != nil:
 		s.emit(EventUserChannelAdded, env.UserChannelAddedEvent)
 	case env.UserChannelRemovedEvent != nil:

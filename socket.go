@@ -23,6 +23,7 @@ const (
 type ReplyMessageData struct {
 	ClanID           string
 	ChannelID        string
+	ChannelType      int
 	Mode             int
 	IsPublic         bool
 	Content          Content
@@ -41,6 +42,7 @@ type EphemeralMessageData struct {
 	ReceiverIDs      []string
 	ClanID           string
 	ChannelID        string
+	ChannelType      int
 	Mode             int
 	IsPublic         bool
 	Content          Content
@@ -59,6 +61,7 @@ type EphemeralMessageData struct {
 type UpdateMessageData struct {
 	ClanID            string
 	ChannelID         string
+	ChannelType       int
 	Mode              int
 	IsPublic          bool
 	MessageID         string
@@ -76,6 +79,7 @@ type ReactMessageData struct {
 	ID              string
 	ClanID          string
 	ChannelID       string
+	ChannelType     int
 	Mode            int
 	IsPublic        bool
 	MessageID       string
@@ -88,12 +92,13 @@ type ReactMessageData struct {
 
 // RemoveMessageData is the payload for deleting a message.
 type RemoveMessageData struct {
-	ClanID    string
-	ChannelID string
-	Mode      int
-	IsPublic  bool
-	MessageID string
-	TopicID   string
+	ClanID      string
+	ChannelID   string
+	ChannelType int
+	Mode        int
+	IsPublic    bool
+	MessageID   string
+	TopicID     string
 }
 
 // DefaultSocket is a protobuf WebSocket connection to the Mezon server, port of

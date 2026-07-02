@@ -3,6 +3,7 @@ package mezon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -98,10 +99,35 @@ func (c *MezonClient) fetchChannel(id string) (*TextChannel, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Guard against the server returning an empty/zero detail, port of the
+	// invalid-channel-detail check in MezonClientCore.fetchChannel.
+	if detail == nil || detail.ChannelId == 0 {
+		return nil, fmt.Errorf("invalid channel detail response for %s", id)
+	}
 	if b, err := proto.Marshal(detail); err == nil {
 		c.l2Set(l2ChannelPrefix+id, b)
 	}
 	return c.buildChannel(detail), nil
+}
+
+// cacheDmChannel caches a DM channel description as a live TextChannel under the
+// DM pseudo-clan, port of MezonClientCore._cacheDmChannel.
+func (c *MezonClient) cacheDmChannel(desc *api.ChannelDescription) *TextChannel {
+	if desc == nil || desc.ChannelId == 0 {
+		return nil
+	}
+	return c.buildChannel(desc)
+}
+
+// initDmChannelCache pre-caches all discovered DM channels, port of
+// MezonClientCore._initDmChannelCache.
+func (c *MezonClient) initDmChannelCache() {
+	if c.channelManager == nil {
+		return
+	}
+	for _, desc := range c.channelManager.GetAllDMChannelDescs() {
+		c.cacheDmChannel(desc)
+	}
 }
 
 // buildChannel rebuilds a live TextChannel from channel detail, wiring it to the

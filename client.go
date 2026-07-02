@@ -36,6 +36,12 @@ type ClientConfig struct {
 	// long-running bot does not grow unboundedly (<= 0 => 5000 each).
 	MaxUsersCache    int
 	MaxChannelsCache int
+
+	// MessageStore, when non-nil, persists every inbound message and backs the
+	// per-channel Messages cache on a miss (port of the SQLite MessageDatabase).
+	// A SQLite implementation is available in the messagedb submodule. nil =>
+	// messages are cached in memory only.
+	MessageStore MessageStore
 }
 
 // MezonClient is the high-level Mezon bot client, port of MezonClient +
@@ -61,6 +67,7 @@ type MezonClient struct {
 	queue          *AsyncThrottleQueue
 	events         *emitter
 	store          SharedStore
+	messageDB      MessageStore
 	cacheTTL       time.Duration
 
 	mu             sync.Mutex
@@ -120,6 +127,7 @@ func NewMezonClient(cfg ClientConfig) (*MezonClient, error) {
 		queue:         NewAsyncThrottleQueue(0),
 		events:        newEmitter(),
 		store:         cfg.Store,
+		messageDB:     cfg.MessageStore,
 		cacheTTL:      cacheTTL,
 	}
 	c.Clans = NewCacheManager[string, *Clan](func(string) (*Clan, error) { return nil, ErrNotFound }, 0)
@@ -206,6 +214,9 @@ func (c *MezonClient) Login() error {
 		// non-fatal, mirror TS which logs and continues
 		log.Printf("mezon: InitAllDMChannels failed: %v", err)
 	}
+	// Pre-cache discovered DM channels as live TextChannels, port of
+	// MezonClientCore._initDmChannelCache.
+	c.initDmChannelCache()
 	c.events.emit(EventReady, nil)
 	return nil
 }

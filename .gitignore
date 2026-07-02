@@ -39,3 +39,6 @@ Thumbs.db
 
 # Local smoke test with real credentials — never commit
 smoketest/
+
+# messagedb (SQLite) local message cache
+mezon-cache/

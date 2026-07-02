@@ -8,14 +8,17 @@ type ChannelManager struct {
 	apiClient *MezonApi
 	socket    *DefaultSocket
 	client    *MezonClient
-	dmByUser  map[string]string // user_id -> dm channel id
+	dmByUser  map[string]string         // user_id -> dm channel id
+	dmDescs   []*api.ChannelDescription // discovered DM channel descriptions
 }
 
 func newChannelManager(apiClient *MezonApi, socket *DefaultSocket, client *MezonClient) *ChannelManager {
 	return &ChannelManager{apiClient: apiClient, socket: socket, client: client, dmByUser: map[string]string{}}
 }
 
-// InitAllDMChannels loads existing DM channels, port of initAllDmChannels.
+// InitAllDMChannels loads existing DM channels, port of initAllDmChannels. It
+// records both the user->channel map and the raw channel descriptions (so the
+// client can pre-cache them as TextChannels).
 func (m *ChannelManager) InitAllDMChannels(sessionToken string) error {
 	if sessionToken == "" {
 		return nil
@@ -24,10 +27,13 @@ func (m *ChannelManager) InitAllDMChannels(sessionToken string) error {
 	if err != nil {
 		return err
 	}
+	m.dmByUser = map[string]string{}
+	m.dmDescs = nil
 	for _, ch := range channels.GetChanneldesc() {
-		if ch.Type != int32(ChannelTypeDM) || len(ch.UserIds) == 0 {
+		if ch.ChannelId == 0 || ch.Type != int32(ChannelTypeDM) || len(ch.UserIds) == 0 {
 			continue
 		}
+		m.dmDescs = append(m.dmDescs, ch)
 		m.dmByUser[itoaID(ch.UserIds[0])] = itoaID(ch.ChannelId)
 	}
 	return nil
@@ -35,6 +41,10 @@ func (m *ChannelManager) InitAllDMChannels(sessionToken string) error {
 
 // GetAllDMChannels returns the discovered DM channel map (user id -> channel id).
 func (m *ChannelManager) GetAllDMChannels() map[string]string { return m.dmByUser }
+
+// GetAllDMChannelDescs returns the discovered DM channel descriptions, port of
+// getAllDmChannelDescs.
+func (m *ChannelManager) GetAllDMChannelDescs() []*api.ChannelDescription { return m.dmDescs }
 
 // CreateDMChannel creates (or returns) a DM channel with the user, port of
 // createDMchannel. It joins the channel realtime chat on success.

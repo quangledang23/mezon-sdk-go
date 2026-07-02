@@ -2,8 +2,6 @@ package mezon
 
 import (
 	"fmt"
-
-	"github.com/quangledang23/mezon-sdk-go/rtapi"
 )
 
 // User is a Mezon user with DM capability, port of
@@ -23,13 +21,17 @@ type User struct {
 }
 
 // SendDM sends a direct message to the user, port of User.sendDM. code is the
-// message TypeMessage code (use 0 for a normal chat message).
-func (u *User) SendDM(content Content, code int, attachments []Attachment) (*rtapi.ChannelMessageAck, error) {
-	return Enqueue(u.queue, func() (*rtapi.ChannelMessageAck, error) {
+// message TypeMessage code (use 0 for a normal chat message). It returns the
+// created Message built from the send ack.
+func (u *User) SendDM(content Content, code int, attachments []Attachment) (*Message, error) {
+	return Enqueue(u.queue, func() (*Message, error) {
 		if u.DmChannelID == "" {
 			ch, err := u.channelManager.CreateDMChannel(u.ID)
 			if err == nil && ch != nil {
 				u.DmChannelID = itoaID(ch.ChannelId)
+				if u.channelManager.client != nil {
+					u.channelManager.client.cacheDmChannel(ch)
+				}
 			}
 		}
 		if u.DmChannelID == "" {
@@ -38,12 +40,21 @@ func (u *User) SendDM(content Content, code int, attachments []Attachment) (*rta
 		data := ReplyMessageData{
 			ClanID:      "0",
 			ChannelID:   u.DmChannelID,
+			ChannelType: int(ChannelTypeDM),
 			Mode:        int(StreamModeDM),
 			IsPublic:    false,
 			Content:     content,
 			Attachments: attachments,
 			Code:        code,
 		}
-		return u.socket.WriteChatMessage(data)
+		ack, err := u.socket.WriteChatMessage(data)
+		if err != nil {
+			return nil, err
+		}
+		channel, err := u.channelManager.client.Channels.Fetch(u.DmChannelID)
+		if err != nil || channel == nil {
+			return nil, err
+		}
+		return channel.createMessageFromAck(ack, data), nil
 	})
 }

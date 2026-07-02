@@ -1235,12 +1235,21 @@ message PermissionUpdate {
   int32 type = 3;
 }
 
+message UploadBatchAttachmentRequest {
+  repeated UploadAttachmentRequest upload_files = 1;
+}
+
+message UploadAttachmentBatch {
+  repeated UploadAttachment uploaded_files = 1;
+}
+
 message UploadAttachmentRequest {
   string filename = 1;
   string filetype = 2;
   int32 size = 3;
   int32 width = 4;
   int32 height = 5;
+  int32 part_count = 6;
 }
 
 message ListMessageMentionRequest {
@@ -1268,6 +1277,7 @@ message MultipartUploadAttachmentPart {
 message MultipartUploadAttachmentFinishRequest {
   string upload_id = 1;
   repeated MultipartUploadAttachmentPart parts = 2;
+  string filename = 3;
 }
 
 message SearchMessageRequest {

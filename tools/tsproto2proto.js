@@ -21,7 +21,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const SDK = path.resolve(__dirname, "../../mezon-sdk/src");
+const SDK = path.resolve(__dirname, "../../mezon-js/packages/mezon-sdk/src");
 const OUT = path.resolve(__dirname, "../proto");
 
 const WRAPPERS = {

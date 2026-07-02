@@ -115,6 +115,15 @@ message Envelope {
   AIAgentEnabledEvent aiagent_enabled_event = 94;
   ListChannelUsersBannedEvent list_channel_users_banned_event = 95;
   .mezon.api.Session refresh_session_event = 96;
+  ChannelArchiveEvent channel_archive_event = 97;
+  TopicInMessageEvent topic_in_message_event = 98;
+}
+
+message TopicInMessageEvent {
+  int64 message_id = 1;
+  int32 rpl = 2;
+  int64 lsnt = 3;
+  string tp_id = 4;
 }
 
 message ApiRequestEvent {
@@ -561,6 +570,29 @@ message StickerDeleteEvent {
 }
 
 message ChannelUpdatedEvent {
+  int64 clan_id = 1;
+  int64 category_id = 2;
+  int64 creator_id = 3;
+  int64 parent_id = 4;
+  int64 channel_id = 5;
+  string channel_label = 6;
+  int32 channel_type = 7;
+  int32 status = 8;
+  string meeting_code = 9;
+  bool is_error = 10;
+  bool channel_private = 11;
+  int64 app_id = 12;
+  int32 e2ee = 13;
+  string topic = 14;
+  int32 age_restricted = 15;
+  int32 active = 16;
+  int32 count_mess_unread = 17;
+  repeated int64 user_ids = 18;
+  repeated int64 role_ids = 19;
+  string channel_avatar = 20;
+}
+
+message ChannelArchiveEvent {
   int64 clan_id = 1;
   int64 category_id = 2;
   int64 creator_id = 3;
