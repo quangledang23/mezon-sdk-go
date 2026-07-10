@@ -5,6 +5,7 @@ import (
 
 	"github.com/quangledang23/mezon-sdk-go/api"
 	"github.com/quangledang23/mezon-sdk-go/rtapi"
+	"google.golang.org/protobuf/proto"
 )
 
 // isMustJoinChannelError reports whether err is the server's "must join channel
@@ -139,6 +140,94 @@ func (s *DefaultSocket) WriteEphemeralMessage(d EphemeralMessageData) (*api.Chan
 		}
 	}
 	return msg, err
+}
+
+// UpdateChannelMessage edits a previously sent message via an API request over
+// the socket, port of socket.updateChannelMessage (which replaced
+// updateChatMessage as the path used by socket_manager in mezon-js v2.8.50).
+func (s *DefaultSocket) UpdateChannelMessage(d UpdateMessageData) (*rtapi.ChannelMessageAck, error) {
+	content, err := marshalContent(d.Content)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateContentLength(content); err != nil {
+		return nil, err
+	}
+	body, err := proto.Marshal(&rtapi.ChannelMessageUpdate{
+		ClanId:            atoiID(d.ClanID),
+		ChannelId:         atoiID(d.ChannelID),
+		MessageId:         atoiID(d.MessageID),
+		Content:           content,
+		Mentions:          mentionsToProto(d.Mentions),
+		Attachments:       attachmentsToProto(d.Attachments),
+		Mode:              int32(d.Mode),
+		IsPublic:          d.IsPublic,
+		HideEditted:       d.HideEditted,
+		TopicId:           atoiID(d.TopicID),
+		IsUpdateMsgTopic:  d.IsUpdateMsgTopic,
+		CreateTimeSeconds: d.CreateTimeSeconds,
+	})
+	if err != nil {
+		return nil, err
+	}
+	respBody, err := s.sendApiRequest("UpdateChannelMessage", body)
+	if err != nil {
+		return nil, err
+	}
+	updated := &rtapi.ChannelMessageUpdate{}
+	if err := proto.Unmarshal(respBody, updated); err != nil {
+		return nil, err
+	}
+	ack := &rtapi.ChannelMessageAck{
+		ChannelId: atoiID(d.ChannelID),
+		MessageId: atoiID(d.MessageID),
+		Code:      1,
+	}
+	if ack.ChannelId == 0 {
+		ack.ChannelId = updated.ChannelId
+	}
+	if ack.MessageId == 0 {
+		ack.MessageId = updated.MessageId
+	}
+	return ack, nil
+}
+
+// DeleteChannelMessage deletes a message via an API request over the socket,
+// port of socket.deleteChannelMessage (which replaced removeChatMessage as the
+// path used by socket_manager in mezon-js v2.8.50).
+func (s *DefaultSocket) DeleteChannelMessage(d RemoveMessageData) (*rtapi.ChannelMessageAck, error) {
+	body, err := proto.Marshal(&rtapi.ChannelMessageRemove{
+		ClanId:        atoiID(d.ClanID),
+		ChannelId:     atoiID(d.ChannelID),
+		MessageId:     atoiID(d.MessageID),
+		Mode:          int32(d.Mode),
+		IsPublic:      d.IsPublic,
+		HasAttachment: d.HasAttachment,
+		TopicId:       atoiID(d.TopicID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	respBody, err := s.sendApiRequest("DeleteChannelMessage", body)
+	if err != nil {
+		return nil, err
+	}
+	removed := &rtapi.ChannelMessageRemove{}
+	if err := proto.Unmarshal(respBody, removed); err != nil {
+		return nil, err
+	}
+	ack := &rtapi.ChannelMessageAck{
+		ChannelId: atoiID(d.ChannelID),
+		MessageId: atoiID(d.MessageID),
+		Code:      2,
+	}
+	if ack.ChannelId == 0 {
+		ack.ChannelId = removed.ChannelId
+	}
+	if ack.MessageId == 0 {
+		ack.MessageId = removed.MessageId
+	}
+	return ack, nil
 }
 
 // UpdateChatMessage edits a previously sent message, port of socket.updateChatMessage.

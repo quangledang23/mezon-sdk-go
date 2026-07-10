@@ -136,7 +136,7 @@ func (m *Message) Update(content Content, mentions []Mention, attachments []Atta
 			TopicID:           topic,
 			IsUpdateMsgTopic:  m.TopicID != "",
 		}
-		if _, err := m.socket.UpdateChatMessage(data); err != nil {
+		if _, err := m.socket.UpdateChannelMessage(data); err != nil {
 			return nil, err
 		}
 		if raw, err := marshalContent(content); err == nil {
@@ -198,7 +198,7 @@ func (m *Message) Delete() (*rtapi.ChannelMessageAck, error) {
 			MessageID:   m.ID,
 			TopicID:     topic,
 		}
-		return m.socket.RemoveChatMessage(data)
+		return m.socket.DeleteChannelMessage(data)
 	})
 }
 

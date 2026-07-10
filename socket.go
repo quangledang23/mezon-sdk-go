@@ -19,6 +19,22 @@ const (
 	defaultConnectTimeout   = 30 * time.Second
 )
 
+// Raw API-response frame layout, port of the PREFIX_RAW handling in
+// web_socket_adapter_pb.ts. Instead of an Envelope, the server answers an
+// ApiRequestEvent with one or more binary frames:
+//
+//	[0]    0xFF prefix
+//	[1:3]  cid, big-endian uint16
+//	[3:7]  big-endian uint32: high 16 bits = response code, low 16 bits = fin flag
+//	[7:]   payload chunk
+//
+// Chunks for a cid are buffered until a frame with fin flag 0xFF arrives.
+const (
+	rawFramePrefix  = 0xff
+	rawHeaderLength = 7
+	rawCodeFin      = 0xff
+)
+
 // ReplyMessageData is the payload for writing/replying a chat message.
 type ReplyMessageData struct {
 	ClanID           string
@@ -92,13 +108,24 @@ type ReactMessageData struct {
 
 // RemoveMessageData is the payload for deleting a message.
 type RemoveMessageData struct {
-	ClanID      string
-	ChannelID   string
-	ChannelType int
-	Mode        int
-	IsPublic    bool
-	MessageID   string
-	TopicID     string
+	ClanID        string
+	ChannelID     string
+	ChannelType   int
+	Mode          int
+	IsPublic      bool
+	MessageID     string
+	TopicID       string
+	HasAttachment bool
+}
+
+// socketResponse is what a cid-correlated wait receives: either an Envelope
+// reply or a reassembled raw API response (port of the api_response message
+// shape produced by web_socket_adapter_pb.ts).
+type socketResponse struct {
+	env         *rtapi.Envelope
+	apiResponse bool
+	code        uint32
+	body        []byte
 }
 
 // DefaultSocket is a protobuf WebSocket connection to the Mezon server, port of
@@ -116,7 +143,7 @@ type DefaultSocket struct {
 	writeMu sync.Mutex
 
 	cidMu   sync.Mutex
-	cids    map[int32]chan *rtapi.Envelope
+	cids    map[int32]chan *socketResponse
 	nextCid int32
 
 	heartbeatTimeout time.Duration
@@ -146,7 +173,7 @@ func NewDefaultSocket(wsURL, host, port string, useSSL bool, emit func(string, a
 		host:             host,
 		port:             port,
 		useSSL:           useSSL,
-		cids:             make(map[int32]chan *rtapi.Envelope),
+		cids:             make(map[int32]chan *socketResponse),
 		nextCid:          1,
 		heartbeatTimeout: defaultHeartbeatTimeout,
 		sendTimeout:      defaultSendTimeout,
@@ -227,14 +254,53 @@ func (s *DefaultSocket) generateCid() int32 {
 	return atomic.AddInt32(&s.nextCid, 1) - 1
 }
 
-// send writes an envelope and waits for the cid-correlated response.
+// send writes an envelope and waits for the cid-correlated Envelope response.
 func (s *DefaultSocket) send(env *rtapi.Envelope, timeout time.Duration) (*rtapi.Envelope, error) {
+	resp, err := s.sendResponse(env, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if resp.apiResponse {
+		return nil, fmt.Errorf("mezon: unexpected raw API response for cid %d", env.Cid)
+	}
+	return resp.env, nil
+}
+
+// sendApiRequest invokes a server API over the socket, port of
+// socket.sendApiRequest. The request rides in an ApiRequestEvent envelope and
+// the response comes back as raw 0xFF-prefixed frames carrying the encoded
+// response proto.
+func (s *DefaultSocket) sendApiRequest(apiName string, body []byte) ([]byte, error) {
+	apiIndex, ok := apiIndexFromName(apiName)
+	if !ok {
+		return nil, fmt.Errorf("mezon: unknown API %q", apiName)
+	}
+	resp, err := s.sendResponse(&rtapi.Envelope{ApiRequestEvent: &rtapi.ApiRequestEvent{
+		ApiIndex: apiIndex,
+		ApiName:  apiName,
+		Body:     body,
+	}}, 0)
+	if err != nil {
+		return nil, err
+	}
+	if !resp.apiResponse {
+		return nil, fmt.Errorf("mezon: expected raw API response for %s, got envelope", apiName)
+	}
+	if resp.code != 0 {
+		return nil, fmt.Errorf("mezon: API %s failed with code %d", apiName, resp.code)
+	}
+	return resp.body, nil
+}
+
+// sendResponse writes an envelope and waits for the cid-correlated response,
+// which is either an Envelope or a reassembled raw API response.
+func (s *DefaultSocket) sendResponse(env *rtapi.Envelope, timeout time.Duration) (*socketResponse, error) {
 	if !s.IsOpen() {
 		return nil, ErrSocketClosed
 	}
 	cid := s.generateCid()
 	env.Cid = cid
-	ch := make(chan *rtapi.Envelope, 1)
+	ch := make(chan *socketResponse, 1)
 
 	s.cidMu.Lock()
 	s.cids[cid] = ch
@@ -260,8 +326,8 @@ func (s *DefaultSocket) send(env *rtapi.Envelope, timeout time.Duration) (*rtapi
 	}
 	select {
 	case resp := <-ch:
-		if resp.Error != nil {
-			return nil, fmt.Errorf("mezon socket error %d: %s", resp.Error.Code, resp.Error.Message)
+		if resp.env != nil && resp.env.Error != nil {
+			return nil, fmt.Errorf("mezon socket error %d: %s", resp.env.Error.Code, resp.env.Error.Message)
 		}
 		return resp, nil
 	case <-time.After(timeout):
@@ -279,11 +345,19 @@ func (s *DefaultSocket) clearCid(cid int32) {
 }
 
 func (s *DefaultSocket) readLoop(conn *websocket.Conn) {
+	// Per-connection chunk buffers for raw API responses, keyed by cid, port of
+	// the _streams map in web_socket_adapter_pb.ts (cleared there on close; here
+	// they die with this goroutine).
+	streams := make(map[int32][][]byte)
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			s.markDisconnected(err.Error())
 			return
+		}
+		if len(data) > 0 && data[0] == rawFramePrefix {
+			s.handleRawFrame(data, streams)
+			continue
 		}
 		env := &rtapi.Envelope{}
 		if err := proto.Unmarshal(data, env); err != nil {
@@ -293,19 +367,89 @@ func (s *DefaultSocket) readLoop(conn *websocket.Conn) {
 			continue
 		}
 		if env.Cid != 0 {
-			s.cidMu.Lock()
-			ch, ok := s.cids[env.Cid]
-			if ok {
-				delete(s.cids, env.Cid)
-			}
-			s.cidMu.Unlock()
-			if ok {
-				ch <- env
+			if ch, ok := s.takeCid(env.Cid); ok {
+				ch <- &socketResponse{env: env}
 			}
 			continue
 		}
 		s.dispatch(env)
 	}
+}
+
+// handleRawFrame buffers a raw API-response chunk and, on the fin frame,
+// delivers the reassembled body to the waiting sender, port of the PREFIX_RAW
+// branch in web_socket_adapter_pb.ts plus the api_response branch of
+// DefaultSocket.onmessage.
+func (s *DefaultSocket) handleRawFrame(data []byte, streams map[int32][][]byte) {
+	if len(data) < rawHeaderLength {
+		if s.Verbose {
+			fmt.Println("mezon: raw frame too small to contain headers")
+		}
+		return
+	}
+	cid := int32(uint16(data[1])<<8 | uint16(data[2]))
+	code := uint32(data[3])<<24 | uint32(data[4])<<16 | uint32(data[5])<<8 | uint32(data[6])
+	payload := data[rawHeaderLength:]
+
+	responseCode := (code >> 16) & 0xffff
+	finFlag := code & 0xffff
+	if finFlag != rawCodeFin {
+		streams[cid] = append(streams[cid], payload)
+		return
+	}
+
+	chunks := streams[cid]
+	delete(streams, cid)
+	if len(payload) > 0 {
+		chunks = append(chunks, payload)
+	}
+	total := 0
+	for _, c := range chunks {
+		total += len(c)
+	}
+	body := make([]byte, 0, total)
+	for _, c := range chunks {
+		body = append(body, c...)
+	}
+
+	ch, ok := s.takeRawCid(cid)
+	if !ok {
+		if s.Verbose {
+			fmt.Printf("mezon: no pending request for API response cid %d\n", cid)
+		}
+		return
+	}
+	ch <- &socketResponse{apiResponse: true, code: responseCode, body: body}
+}
+
+// takeCid removes and returns the response channel registered for cid.
+func (s *DefaultSocket) takeCid(cid int32) (chan *socketResponse, bool) {
+	s.cidMu.Lock()
+	defer s.cidMu.Unlock()
+	ch, ok := s.cids[cid]
+	if ok {
+		delete(s.cids, cid)
+	}
+	return ch, ok
+}
+
+// takeRawCid is takeCid for raw API frames, which only carry the low 16 bits
+// of the cid: when the exact key is missing (the counter has passed 65535) it
+// falls back to the pending request whose truncated cid matches.
+func (s *DefaultSocket) takeRawCid(cid int32) (chan *socketResponse, bool) {
+	s.cidMu.Lock()
+	defer s.cidMu.Unlock()
+	if ch, ok := s.cids[cid]; ok {
+		delete(s.cids, cid)
+		return ch, true
+	}
+	for k, ch := range s.cids {
+		if int32(uint16(k)) == cid {
+			delete(s.cids, k)
+			return ch, true
+		}
+	}
+	return nil, false
 }
 
 func (s *DefaultSocket) markDisconnected(reason string) {

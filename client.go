@@ -235,6 +235,9 @@ func (c *MezonClient) connectSocket(sessionToken string) error {
 	for _, cl := range clans.GetClandesc() {
 		list = append(list, clanInfo{itoaID(cl.ClanId), cl.ClanName, itoaID(cl.WelcomeChannelId)})
 	}
+	// Give the server a beat after connect before joining clan chats, port of
+	// the sleep(1000) added to socket_manager.connectSocket in mezon-js v2.8.50.
+	time.Sleep(time.Second)
 	list = append(list, clanInfo{"0", "", ""}) // global / DM pseudo-clan
 	for _, cl := range list {
 		if _, err := c.socket.JoinClanChat(cl.id); err != nil {
