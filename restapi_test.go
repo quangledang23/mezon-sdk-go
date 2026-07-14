@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -63,5 +64,56 @@ func TestMezonAuthenticateRequest(t *testing.T) {
 	account, _ := gotBody["account"].(map[string]any)
 	if account == nil || account["appid"] != botID || account["token"] != token {
 		t.Errorf("body account = %v, want appid=%q token=%q", account, botID, token)
+	}
+}
+
+// TestDoProtoOverSocket verifies /mezon.api.Mezon/ requests ride the realtime
+// socket when it is open: the HTTP base path is unreachable on purpose, so a
+// successful round trip proves the socket carried it.
+func TestDoProtoOverSocket(t *testing.T) {
+	addr, closeFn := fakeTCPServer(t, "tok")
+	defer closeFn()
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewDefaultSocket("", host, port, false, func(string, any) {})
+	if err := s.Connect(&Session{Token: "tok"}, false); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer s.Close()
+
+	apiClient := NewMezonApi("k", "http://127.0.0.1:1", 0)
+	apiClient.socket = s
+
+	resp := &api.Session{}
+	err = apiClient.doProto("bearer", "/mezon.api.Mezon/ListClanDescs", &api.Session{Token: "round-trip"}, resp)
+	if err != nil {
+		t.Fatalf("doProto: %v", err)
+	}
+	if resp.Token != "round-trip" {
+		t.Fatalf("resp token = %q, want %q", resp.Token, "round-trip")
+	}
+}
+
+// TestDoProtoFallsBackToHTTP verifies a closed socket routes to HTTP.
+func TestDoProtoFallsBackToHTTP(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		out, _ := proto.Marshal(&api.Session{Token: "via-http"})
+		_, _ = w.Write(out)
+	}))
+	defer srv.Close()
+
+	apiClient := NewMezonApi("k", srv.URL, 0)
+	apiClient.socket = NewDefaultSocket("", "127.0.0.1", "1", false, func(string, any) {}) // never connected
+
+	resp := &api.Session{}
+	if err := apiClient.doProto("bearer", "/mezon.api.Mezon/ListClanDescs", nil, resp); err != nil {
+		t.Fatalf("doProto: %v", err)
+	}
+	if hits != 1 || resp.Token != "via-http" {
+		t.Fatalf("hits = %d, token = %q; want HTTP fallback", hits, resp.Token)
 	}
 }

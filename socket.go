@@ -2,6 +2,7 @@ package mezon
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"sync"
@@ -17,6 +18,11 @@ const (
 	defaultHeartbeatTimeout = 10 * time.Second
 	defaultSendTimeout      = 10 * time.Second
 	defaultConnectTimeout   = 30 * time.Second
+	// eventQueueSize buffers server-pushed events between the read loop and the
+	// dispatch goroutine. Big enough to absorb command bursts; if it ever fills
+	// (a handler wedged far beyond the send timeout), the read loop applies
+	// backpressure instead of dropping events.
+	eventQueueSize = 1024
 )
 
 // Raw API-response frame layout, port of the PREFIX_RAW handling in
@@ -128,10 +134,10 @@ type socketResponse struct {
 	body        []byte
 }
 
-// DefaultSocket is a protobuf WebSocket connection to the Mezon server, port of
-// DefaultSocket + WebSocketAdapterPb in the TS SDK. It encodes/decodes
-// rtapi.Envelope frames over a binary WebSocket and correlates request/response
-// pairs by cid.
+// DefaultSocket is a realtime connection to the Mezon server, port of
+// DefaultSocket + the transport adapters in the TS SDK. It encodes/decodes
+// rtapi.Envelope frames over a transportConn (abridged TCP by default,
+// WebSocket opt-in) and correlates request/response pairs by cid.
 type DefaultSocket struct {
 	wsURL   string
 	host    string
@@ -139,7 +145,13 @@ type DefaultSocket struct {
 	useSSL  bool
 	Verbose bool
 
-	conn    *websocket.Conn
+	// Transport selects the wire transport for the next Connect; empty means
+	// TransportTCP. TLSInsecureSkipVerify disables certificate verification for
+	// the TCP transport (dev gateways use self-signed certs).
+	Transport             TransportKind
+	TLSInsecureSkipVerify bool
+
+	conn    transportConn
 	writeMu sync.Mutex
 
 	cidMu   sync.Mutex
@@ -205,13 +217,47 @@ func (s *DefaultSocket) buildURL(token string, createStatus bool) string {
 	return fmt.Sprintf("%s://%s/ws?%s", scheme, wsHost, q.Encode())
 }
 
-// Connect establishes the websocket connection using the session token.
+// tcpAddr resolves the TCP transport endpoint from the same fields buildURL
+// uses: session WsURL first, host[:port] otherwise; port defaults to 443.
+func (s *DefaultSocket) tcpAddr() (host, port string) {
+	if s.wsURL != "" {
+		if h, p, err := net.SplitHostPort(s.wsURL); err == nil {
+			return h, p
+		}
+		return s.wsURL, "443"
+	}
+	if s.port != "" {
+		return s.host, s.port
+	}
+	return s.host, "443"
+}
+
+func (s *DefaultSocket) logf(format string, args ...any) {
+	if s.Verbose {
+		fmt.Printf(format+"\n", args...)
+	}
+}
+
+// dial establishes the wire connection for the configured transport.
+func (s *DefaultSocket) dial(token string, createStatus bool) (transportConn, error) {
+	if s.Transport == TransportWebSocket {
+		dialer := websocket.Dialer{HandshakeTimeout: defaultConnectTimeout}
+		conn, _, err := dialer.Dial(s.buildURL(token, createStatus), nil)
+		if err != nil {
+			return nil, err
+		}
+		return &wsConn{conn: conn, logf: s.logf}, nil
+	}
+	host, port := s.tcpAddr()
+	return dialTCP(host, port, s.useSSL, s.TLSInsecureSkipVerify, token)
+}
+
+// Connect establishes the connection using the session token.
 func (s *DefaultSocket) Connect(session *Session, createStatus bool) error {
 	if s.IsOpen() {
 		return nil
 	}
-	dialer := websocket.Dialer{HandshakeTimeout: defaultConnectTimeout}
-	conn, _, err := dialer.Dial(s.buildURL(session.Token, createStatus), nil)
+	conn, err := s.dial(session.Token, createStatus)
 	if err != nil {
 		if s.OnError != nil {
 			s.OnError(err)
@@ -231,9 +277,32 @@ func (s *DefaultSocket) Connect(session *Session, createStatus bool) error {
 	s.closeDone = closeDone
 	s.writeMu.Unlock()
 	s.connected.Store(true)
-	go s.readLoop(conn)
+	// Events are dispatched on their own goroutine, NOT on the read loop. A
+	// handler that performs a send-and-wait (e.g. a bot replying from inside
+	// OnChannelMessage) parks until the cid response arrives — if dispatch ran
+	// inline in readLoop, nobody could read that response and every reply would
+	// stall for the full send timeout (and starve heartbeat pongs into a fake
+	// "heartbeat timeout" disconnect). The TS SDK gets this for free from the JS
+	// event loop; here the buffered channel plays that role while preserving
+	// event order.
+	events := make(chan *rtapi.Envelope, eventQueueSize)
+	go s.dispatchLoop(events, done)
+	go s.readLoop(conn, events, done)
 	go s.heartbeatLoop(done)
 	return nil
+}
+
+// dispatchLoop delivers server-pushed envelopes to handlers in arrival order,
+// decoupled from the read loop so handlers may send-and-wait safely.
+func (s *DefaultSocket) dispatchLoop(events <-chan *rtapi.Envelope, done chan struct{}) {
+	for {
+		select {
+		case env := <-events:
+			s.dispatch(env)
+		case <-done:
+			return
+		}
+	}
 }
 
 // Close shuts down the connection.
@@ -246,7 +315,7 @@ func (s *DefaultSocket) Close() {
 		closeDone()
 	}
 	if conn != nil {
-		_ = conn.Close()
+		_ = conn.close()
 	}
 }
 
@@ -314,7 +383,13 @@ func (s *DefaultSocket) sendResponse(env *rtapi.Envelope, timeout time.Duration)
 
 	s.writeMu.Lock()
 	conn, done := s.conn, s.done
-	err = conn.WriteMessage(websocket.BinaryMessage, data)
+	if env.Ping != nil && conn.nativePing() {
+		// The TCP transport carries heartbeats as a dedicated 3-byte frame; the
+		// pong comes back as framePong and resolves this cid.
+		err = conn.writePing(cid)
+	} else {
+		err = conn.writeEnvelope(data)
+	}
 	s.writeMu.Unlock()
 	if err != nil {
 		s.clearCid(cid)
@@ -344,64 +419,63 @@ func (s *DefaultSocket) clearCid(cid int32) {
 	s.cidMu.Unlock()
 }
 
-func (s *DefaultSocket) readLoop(conn *websocket.Conn) {
+func (s *DefaultSocket) readLoop(conn transportConn, events chan<- *rtapi.Envelope, done chan struct{}) {
 	// Per-connection chunk buffers for raw API responses, keyed by cid, port of
-	// the _streams map in web_socket_adapter_pb.ts (cleared there on close; here
-	// they die with this goroutine).
+	// the _streams map in the TS adapters (cleared there on close; here they die
+	// with this goroutine).
 	streams := make(map[int32][][]byte)
 	for {
-		_, data, err := conn.ReadMessage()
+		f, err := conn.readFrame()
 		if err != nil {
 			s.markDisconnected(err.Error())
 			return
 		}
-		if len(data) > 0 && data[0] == rawFramePrefix {
-			s.handleRawFrame(data, streams)
-			continue
-		}
-		env := &rtapi.Envelope{}
-		if err := proto.Unmarshal(data, env); err != nil {
-			if s.Verbose {
-				fmt.Println("mezon: failed to decode envelope:", err)
+		switch f.kind {
+		case frameAPIChunk:
+			s.deliverAPIChunk(f, streams)
+		case framePong:
+			// TCP heartbeat reply: resolve the waiting ping sender with a
+			// synthetic pong envelope.
+			if ch, ok := s.takeRawCid(f.cid); ok {
+				ch <- &socketResponse{env: &rtapi.Envelope{Cid: f.cid, Pong: &rtapi.Pong{}}}
 			}
-			continue
-		}
-		if env.Cid != 0 {
-			if ch, ok := s.takeCid(env.Cid); ok {
-				ch <- &socketResponse{env: env}
+		default: // frameEnvelope
+			env := &rtapi.Envelope{}
+			if err := proto.Unmarshal(f.payload, env); err != nil {
+				s.logf("mezon: failed to decode envelope: %v", err)
+				continue
 			}
-			continue
+			// cid-correlated responses unblock waiting senders and MUST be
+			// handled here, never queued behind event handlers.
+			if env.Cid != 0 {
+				if ch, ok := s.takeCid(env.Cid); ok {
+					ch <- &socketResponse{env: env}
+				}
+				continue
+			}
+			select {
+			case events <- env:
+			case <-done:
+				return
+			}
 		}
-		s.dispatch(env)
 	}
 }
 
-// handleRawFrame buffers a raw API-response chunk and, on the fin frame,
+// deliverAPIChunk buffers a raw API-response chunk and, on the fin frame,
 // delivers the reassembled body to the waiting sender, port of the PREFIX_RAW
-// branch in web_socket_adapter_pb.ts plus the api_response branch of
+// branch in the TS adapters plus the api_response branch of
 // DefaultSocket.onmessage.
-func (s *DefaultSocket) handleRawFrame(data []byte, streams map[int32][][]byte) {
-	if len(data) < rawHeaderLength {
-		if s.Verbose {
-			fmt.Println("mezon: raw frame too small to contain headers")
-		}
-		return
-	}
-	cid := int32(uint16(data[1])<<8 | uint16(data[2]))
-	code := uint32(data[3])<<24 | uint32(data[4])<<16 | uint32(data[5])<<8 | uint32(data[6])
-	payload := data[rawHeaderLength:]
-
-	responseCode := (code >> 16) & 0xffff
-	finFlag := code & 0xffff
-	if finFlag != rawCodeFin {
-		streams[cid] = append(streams[cid], payload)
+func (s *DefaultSocket) deliverAPIChunk(f *wireFrame, streams map[int32][][]byte) {
+	if !f.fin {
+		streams[f.cid] = append(streams[f.cid], f.payload)
 		return
 	}
 
-	chunks := streams[cid]
-	delete(streams, cid)
-	if len(payload) > 0 {
-		chunks = append(chunks, payload)
+	chunks := streams[f.cid]
+	delete(streams, f.cid)
+	if len(f.payload) > 0 {
+		chunks = append(chunks, f.payload)
 	}
 	total := 0
 	for _, c := range chunks {
@@ -412,14 +486,12 @@ func (s *DefaultSocket) handleRawFrame(data []byte, streams map[int32][][]byte) 
 		body = append(body, c...)
 	}
 
-	ch, ok := s.takeRawCid(cid)
+	ch, ok := s.takeRawCid(f.cid)
 	if !ok {
-		if s.Verbose {
-			fmt.Printf("mezon: no pending request for API response cid %d\n", cid)
-		}
+		s.logf("mezon: no pending request for API response cid %d", f.cid)
 		return
 	}
-	ch <- &socketResponse{apiResponse: true, code: responseCode, body: body}
+	ch <- &socketResponse{apiResponse: true, code: f.code, body: body}
 }
 
 // takeCid removes and returns the response channel registered for cid.
@@ -480,7 +552,16 @@ func (s *DefaultSocket) heartbeatLoop(done chan struct{}) {
 				if s.OnHeartbeatTimeout != nil {
 					s.OnHeartbeatTimeout()
 				}
-				s.Close()
+				// Fire OnDisconnect (via markDisconnected) so the client can
+				// reconnect; Close() would swallow it by flipping connected
+				// first, leaving the socket dead forever.
+				s.markDisconnected("heartbeat timeout: " + err.Error())
+				s.writeMu.Lock()
+				conn := s.conn
+				s.writeMu.Unlock()
+				if conn != nil {
+					_ = conn.close()
+				}
 				return
 			}
 		}

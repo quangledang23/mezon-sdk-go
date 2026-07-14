@@ -24,6 +24,13 @@ type ClientConfig struct {
 	UseSSL  *bool // nil => default (true)
 	Timeout time.Duration
 
+	// Transport selects the realtime wire transport: TransportTCP (abridged
+	// TLS/TCP, the default when empty) or TransportWebSocket.
+	Transport TransportKind
+	// TLSInsecureSkipVerify disables certificate verification for the TCP
+	// transport; dev gateways use self-signed certificates.
+	TLSInsecureSkipVerify bool
+
 	// Store, when non-nil, is an L2 cache shared across bot instances (e.g.
 	// Redis). Channel and user lookups consult it before hitting the REST API
 	// and populate it on a miss, so replicas avoid redundant REST calls. The
@@ -54,6 +61,9 @@ type MezonClient struct {
 	Port     string
 	UseSSL   bool
 	Timeout  time.Duration
+
+	Transport             TransportKind
+	TLSInsecureSkipVerify bool
 
 	Clans    *CacheManager[string, *Clan]
 	Channels *CacheManager[string, *TextChannel]
@@ -117,18 +127,20 @@ func NewMezonClient(cfg ClientConfig) (*MezonClient, error) {
 		maxChannels = defaultMaxCache
 	}
 	c := &MezonClient{
-		Token:         cfg.Token,
-		ClientID:      cfg.BotID,
-		Host:          host,
-		Port:          port,
-		UseSSL:        useSSL,
-		Timeout:       timeout,
-		loginBasePath: scheme + host + ":" + port,
-		queue:         NewAsyncThrottleQueue(0),
-		events:        newEmitter(),
-		store:         cfg.Store,
-		messageDB:     cfg.MessageStore,
-		cacheTTL:      cacheTTL,
+		Token:                 cfg.Token,
+		ClientID:              cfg.BotID,
+		Host:                  host,
+		Port:                  port,
+		UseSSL:                useSSL,
+		Timeout:               timeout,
+		Transport:             cfg.Transport,
+		TLSInsecureSkipVerify: cfg.TLSInsecureSkipVerify,
+		loginBasePath:         scheme + host + ":" + port,
+		queue:                 NewAsyncThrottleQueue(0),
+		events:                newEmitter(),
+		store:                 cfg.Store,
+		messageDB:             cfg.MessageStore,
+		cacheTTL:              cacheTTL,
 	}
 	c.Clans = NewCacheManager[string, *Clan](func(string) (*Clan, error) { return nil, ErrNotFound }, 0)
 	c.Channels = NewCacheManager[string, *TextChannel](c.fetchChannel, maxChannels)
@@ -162,6 +174,11 @@ func (c *MezonClient) initManagers(basePath string, session *Session) {
 		wsURL = session.WsURL
 	}
 	c.socket = NewDefaultSocket(wsURL, c.Host, c.Port, c.UseSSL, c.events.emit)
+	c.socket.Transport = c.Transport
+	c.socket.TLSInsecureSkipVerify = c.TLSInsecureSkipVerify
+	// REST API calls prefer the realtime socket once it is open (see
+	// MezonApi.doProtoSocket); until then they go over HTTP.
+	c.apiClient.socket = c.socket
 	c.socket.OnDisconnect = func(reason string) {
 		if c.hardDisconnect {
 			return

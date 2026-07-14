@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/quangledang23/mezon-sdk-go/api"
@@ -25,6 +27,12 @@ type MezonApi struct {
 	BasePath string
 	Timeout  time.Duration
 	client   *http.Client
+
+	// socket, when set and open, carries the /mezon.api.Mezon/ requests as
+	// ApiRequestEvent frames over the realtime connection instead of HTTP (port
+	// of MezonTransport in mezon-js transport.ts). HTTP remains the fallback
+	// when the socket is down (port of the client's autoFallbackHttp).
+	socket *DefaultSocket
 }
 
 // NewMezonApi creates a REST client.
@@ -40,7 +48,8 @@ func NewMezonApi(apiKey, basePath string, timeout time.Duration) *MezonApi {
 	}
 }
 
-// doProto posts a protobuf request to path and decodes the protobuf response.
+// doProto sends a protobuf request to path and decodes the protobuf response,
+// preferring the realtime socket and falling back to HTTP POST.
 func (a *MezonApi) doProto(bearer, path string, req, resp proto.Message) error {
 	var body []byte
 	if req != nil {
@@ -49,6 +58,9 @@ func (a *MezonApi) doProto(bearer, path string, req, resp proto.Message) error {
 			return err
 		}
 		body = b
+	}
+	if handled, err := a.doProtoSocket(path, body, resp); handled {
+		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), a.Timeout)
 	defer cancel()
@@ -80,6 +92,41 @@ func (a *MezonApi) doProto(bearer, path string, req, resp proto.Message) error {
 		return proto.Unmarshal(data, resp)
 	}
 	return nil
+}
+
+// AttachSocket routes this client's /mezon.api.Mezon/ requests over the given
+// realtime socket whenever it is open (see doProtoSocket). MezonClient wires
+// this up automatically; it is exported for low-level socket users.
+func (a *MezonApi) AttachSocket(s *DefaultSocket) { a.socket = s }
+
+// doProtoSocket routes a /mezon.api.Mezon/ request over the realtime socket.
+// handled=false means the caller must fall back to HTTP: the socket is unset
+// or down, the endpoint has no ApiNameEnum index, or the send failed at the
+// transport level. An API-level failure (non-zero response code) is a real
+// server answer and is returned as the final error, not retried over HTTP.
+func (a *MezonApi) doProtoSocket(path string, body []byte, resp proto.Message) (bool, error) {
+	s := a.socket
+	if s == nil || !s.IsOpen() {
+		return false, nil
+	}
+	name := strings.TrimPrefix(path, "/mezon.api.Mezon/")
+	if name == path {
+		return false, nil
+	}
+	if _, ok := apiIndexFromName(name); !ok {
+		return false, nil
+	}
+	respBody, err := s.sendApiRequest(name, body)
+	if err != nil {
+		if errors.Is(err, ErrSocketClosed) || errors.Is(err, ErrSendTimeout) {
+			return false, nil
+		}
+		return true, err
+	}
+	if resp != nil && len(respBody) > 0 {
+		return true, proto.Unmarshal(respBody, resp)
+	}
+	return true, nil
 }
 
 // MezonAuthenticate authenticates an app/bot and returns its session, port of
@@ -133,6 +180,15 @@ func (a *MezonApi) CreateChannelDesc(bearer string, req *api.CreateChannelDescRe
 		return nil, err
 	}
 	return resp, nil
+}
+
+// DeleteChannelDesc deletes a channel, port of deleteChannelDesc.
+func (a *MezonApi) DeleteChannelDesc(bearer, clanID, channelID string) error {
+	req := &api.DeleteChannelDescRequest{
+		ClanId:    atoiID(clanID),
+		ChannelId: atoiID(channelID),
+	}
+	return a.doProto(bearer, "/mezon.api.Mezon/DeleteChannelDesc", req, nil)
 }
 
 // ListClanDescs lists the clans the bot belongs to, port of listClanDescs.

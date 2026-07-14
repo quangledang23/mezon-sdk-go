@@ -2,7 +2,18 @@ package mezon
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/quangledang23/mezon-sdk-go/api"
+	"github.com/quangledang23/mezon-sdk-go/rtapi"
 )
 
 // rawFrame builds a 0xFF-prefixed API response frame as produced by the
@@ -24,13 +35,24 @@ func newTestSocket() *DefaultSocket {
 	return NewDefaultSocket("", "example.com", "", true, func(string, any) {})
 }
 
+// wsRawFrame parses data as a WebSocket raw API frame and feeds it to the
+// socket's chunk delivery, the path readLoop takes for 0xFF messages.
+func (s *DefaultSocket) wsRawFrame(t *testing.T, data []byte, streams map[int32][][]byte) {
+	t.Helper()
+	f, ok := parseWSRawFrame(data)
+	if !ok {
+		t.Fatal("frame did not parse")
+	}
+	s.deliverAPIChunk(f, streams)
+}
+
 func TestHandleRawFrameSingle(t *testing.T) {
 	s := newTestSocket()
 	ch := make(chan *socketResponse, 1)
 	s.cids[7] = ch
 	streams := make(map[int32][][]byte)
 
-	s.handleRawFrame(rawFrame(7, 0, rawCodeFin, []byte("hello")), streams)
+	s.wsRawFrame(t, rawFrame(7, 0, rawCodeFin, []byte("hello")), streams)
 
 	select {
 	case resp := <-ch:
@@ -57,12 +79,12 @@ func TestHandleRawFrameChunked(t *testing.T) {
 	s.cids[9] = ch
 	streams := make(map[int32][][]byte)
 
-	s.handleRawFrame(rawFrame(9, 0, 0, []byte("foo")), streams)
-	s.handleRawFrame(rawFrame(9, 0, 0, []byte("bar")), streams)
+	s.wsRawFrame(t, rawFrame(9, 0, 0, []byte("foo")), streams)
+	s.wsRawFrame(t, rawFrame(9, 0, 0, []byte("bar")), streams)
 	if len(streams[9]) != 2 {
 		t.Fatalf("buffered chunks = %d, want 2", len(streams[9]))
 	}
-	s.handleRawFrame(rawFrame(9, 0, rawCodeFin, []byte("baz")), streams)
+	s.wsRawFrame(t, rawFrame(9, 0, rawCodeFin, []byte("baz")), streams)
 
 	resp := <-ch
 	if !bytes.Equal(resp.body, []byte("foobarbaz")) {
@@ -79,7 +101,7 @@ func TestHandleRawFrameErrorCode(t *testing.T) {
 	s.cids[3] = ch
 	streams := make(map[int32][][]byte)
 
-	s.handleRawFrame(rawFrame(3, 13, rawCodeFin, nil), streams)
+	s.wsRawFrame(t, rawFrame(3, 13, rawCodeFin, nil), streams)
 
 	resp := <-ch
 	if resp.code != 13 {
@@ -88,12 +110,118 @@ func TestHandleRawFrameErrorCode(t *testing.T) {
 }
 
 func TestHandleRawFrameTooShort(t *testing.T) {
-	s := newTestSocket()
-	streams := make(map[int32][][]byte)
-	// Must not panic or buffer anything.
-	s.handleRawFrame([]byte{rawFramePrefix, 0, 1}, streams)
-	if len(streams) != 0 {
-		t.Fatal("short frame should be ignored")
+	// A frame shorter than the header must be rejected by the parser.
+	if _, ok := parseWSRawFrame([]byte{rawFramePrefix, 0, 1}); ok {
+		t.Fatal("short frame should be rejected")
+	}
+}
+
+// A server that accepts the websocket but never answers pings must surface a
+// heartbeat timeout as OnDisconnect so the client can reconnect; Close()ing
+// silently would leave the socket dead forever.
+func TestHeartbeatTimeoutFiresOnDisconnect(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewDefaultSocket("", u.Hostname(), u.Port(), false, func(string, any) {})
+	s.Transport = TransportWebSocket
+	s.heartbeatTimeout = 50 * time.Millisecond
+
+	disconnected := make(chan string, 1)
+	s.OnDisconnect = func(reason string) { disconnected <- reason }
+
+	if err := s.Connect(&Session{Token: "test"}, false); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	select {
+	case reason := <-disconnected:
+		if !strings.Contains(reason, "heartbeat timeout") {
+			t.Fatalf("reason = %q, want heartbeat timeout", reason)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDisconnect never fired after heartbeat timeout")
+	}
+	if s.IsOpen() {
+		t.Fatal("socket should be marked disconnected")
+	}
+}
+
+// A handler that performs a send-and-wait from inside an event callback (the
+// normal shape of a bot replying in OnChannelMessage) must complete in ~one
+// round trip. If events were dispatched inline on the read loop, the cid
+// response could never be read: every reply would burn the full send timeout
+// and heartbeat pongs would starve into a fake disconnect.
+func TestDispatchDoesNotBlockReadLoop(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		// Push one server event to trigger the client's handler…
+		env := &rtapi.Envelope{ChannelMessage: &api.ChannelMessage{ChannelId: 1}}
+		data, _ := proto.Marshal(env)
+		_ = c.WriteMessage(websocket.BinaryMessage, data)
+		// …then echo back any cid-correlated request (the handler's send).
+		for {
+			_, in, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			req := &rtapi.Envelope{}
+			if proto.Unmarshal(in, req) == nil && req.Cid != 0 {
+				out, _ := proto.Marshal(&rtapi.Envelope{Cid: req.Cid})
+				_ = c.WriteMessage(websocket.BinaryMessage, out)
+			}
+		}
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handlerDone := make(chan error, 1)
+	var s *DefaultSocket
+	s = NewDefaultSocket("", u.Hostname(), u.Port(), false, func(event string, _ any) {
+		if event != EventChannelMessage {
+			return
+		}
+		_, err := s.send(&rtapi.Envelope{Ping: &rtapi.Ping{}}, 2*time.Second)
+		handlerDone <- err
+	})
+	s.Transport = TransportWebSocket
+	s.heartbeatTimeout = time.Minute // keep the heartbeat out of this test
+	if err := s.Connect(&Session{Token: "test"}, false); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer s.Close()
+
+	select {
+	case err := <-handlerDone:
+		if err != nil {
+			t.Fatalf("send from inside a handler: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler still blocked — events are being dispatched on the read loop")
 	}
 }
 

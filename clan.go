@@ -69,6 +69,67 @@ func (c *Clan) LoadChannels() error {
 	return nil
 }
 
+// CreateChannelData configures Clan.CreateChannel.
+type CreateChannelData struct {
+	Label string
+	// Type is one of the ChannelType* constants; 0 => ChannelTypeChannel.
+	Type    int
+	Private bool
+	// CategoryID places the channel in a category; "" => the clan default.
+	CategoryID string
+	// UserIDs invites members, typically for private channels.
+	UserIDs []string
+	// ParentID makes the channel a thread under the given channel.
+	ParentID string
+}
+
+// CreateChannel creates a channel in the clan and caches it as a live
+// TextChannel. Bulk creation is one call per channel — the server has no
+// batch endpoint.
+func (c *Clan) CreateChannel(d CreateChannelData) (*api.ChannelDescription, error) {
+	if d.Label == "" {
+		return nil, fmt.Errorf("mezon: channel label is required")
+	}
+	channelType := d.Type
+	if channelType == 0 {
+		channelType = int(ChannelTypeChannel)
+	}
+	private := int32(0)
+	if d.Private {
+		private = 1
+	}
+	userIDs := make([]int64, 0, len(d.UserIDs))
+	for _, id := range d.UserIDs {
+		userIDs = append(userIDs, atoiID(id))
+	}
+	ch, err := c.apiClient.CreateChannelDesc(c.SessionToken, &api.CreateChannelDescRequest{
+		ClanId:         atoiID(c.ID),
+		ParentId:       atoiID(d.ParentID),
+		CategoryId:     atoiID(d.CategoryID),
+		Type:           int32(channelType),
+		ChannelLabel:   d.Label,
+		ChannelPrivate: private,
+		UserIds:        userIDs,
+	})
+	if err != nil || ch == nil {
+		return nil, err
+	}
+	channelObj := newTextChannel(ch, c, c.socket, c.queue)
+	c.Channels.Set(channelObj.ID, channelObj)
+	c.client.Channels.Set(channelObj.ID, channelObj)
+	return ch, nil
+}
+
+// DeleteChannel deletes a channel from the clan and evicts it from the caches.
+func (c *Clan) DeleteChannel(channelID string) error {
+	if err := c.apiClient.DeleteChannelDesc(c.SessionToken, c.ID, channelID); err != nil {
+		return err
+	}
+	c.Channels.Delete(channelID)
+	c.client.Channels.Delete(channelID)
+	return nil
+}
+
 // ListRoles lists clan roles, port of Clan.listRoles.
 func (c *Clan) ListRoles(limit, state int32, cursor string) (*api.RoleListEventResponse, error) {
 	return c.apiClient.ListRoles(c.SessionToken, c.ID, limit, state, cursor)
