@@ -61,12 +61,69 @@ func TestAbridgedEnvelopeRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("n=%d: %v", n, err)
 		}
-		if f.kind != frameEnvelope {
-			t.Fatalf("n=%d: kind = %d, want envelope", n, f.kind)
+		if f.kind != frameEnvelope || !f.padded {
+			t.Fatalf("n=%d: frame = %+v, want padded envelope", n, f)
 		}
-		if !bytes.Equal(f.payload, payload) {
+		if !bytes.Equal(trimAbridgedPadding(f.payload), payload) {
 			t.Fatalf("n=%d: payload mismatch (got %d bytes)", n, len(f.payload))
 		}
+	}
+}
+
+// An envelope whose proto encoding ends with 0x00 (empty trailing submessage)
+// must survive both directions: outbound the writer appends an unknown-field
+// guard so the gateway's padding trim cannot eat the zero, inbound the
+// decoder distinguishes padding from content by trial parsing.
+func TestEnvelopeTrailingZeroBothDirections(t *testing.T) {
+	env := &rtapi.Envelope{Cid: 1, ClanJoin: &rtapi.ClanJoin{}}
+	data, err := proto.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data[len(data)-1] != 0x00 {
+		t.Fatalf("fixture no longer ends with 0x00: % x", data)
+	}
+
+	// Outbound: writeEnvelope must emit a payload that still decodes to the
+	// same message after the server-side trim (trimAbridgedPadding).
+	client, server := net.Pipe()
+	go func() {
+		c := &tcpConn{conn: client}
+		_ = c.writeEnvelope(data)
+		_ = client.Close()
+	}()
+	r := bufio.NewReader(server)
+	prefix, err := r.ReadByte()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadLen, err := readAbridgedLength(r, prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, payloadLen)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		t.Fatal(err)
+	}
+	got := &rtapi.Envelope{}
+	if err := proto.Unmarshal(trimAbridgedPadding(payload), got); err != nil {
+		t.Fatalf("server-side decode after trim: %v", err)
+	}
+	if got.Cid != 1 || got.ClanJoin == nil {
+		t.Fatalf("server-side decode = %+v", got)
+	}
+
+	// Inbound: a padded frame whose proto content ends with 0x00.
+	f, err := readerConn(encodeAbridgedFrame(data)).readFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := unmarshalEnvelope(f)
+	if err != nil {
+		t.Fatalf("unmarshalEnvelope: %v", err)
+	}
+	if dec.Cid != 1 || dec.ClanJoin == nil {
+		t.Fatalf("decoded = %+v", dec)
 	}
 }
 

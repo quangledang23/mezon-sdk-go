@@ -440,8 +440,8 @@ func (s *DefaultSocket) readLoop(conn transportConn, events chan<- *rtapi.Envelo
 				ch <- &socketResponse{env: &rtapi.Envelope{Cid: f.cid, Pong: &rtapi.Pong{}}}
 			}
 		default: // frameEnvelope
-			env := &rtapi.Envelope{}
-			if err := proto.Unmarshal(f.payload, env); err != nil {
+			env, err := unmarshalEnvelope(f)
+			if err != nil {
 				s.logf("mezon: failed to decode envelope: %v", err)
 				continue
 			}
@@ -460,6 +460,25 @@ func (s *DefaultSocket) readLoop(conn transportConn, events chan<- *rtapi.Envelo
 			}
 		}
 	}
+}
+
+// unmarshalEnvelope decodes a frame's envelope. An abridged frame still
+// carries its 0-3 zero padding bytes, indistinguishable from proto content
+// that really ends in 0x00; a padded parse fails on the stray zeros, so
+// decoding retries with one fewer trailing zero until it parses.
+func unmarshalEnvelope(f *wireFrame) (*rtapi.Envelope, error) {
+	data := f.payload
+	env := &rtapi.Envelope{}
+	err := proto.Unmarshal(data, env)
+	if !f.padded {
+		return env, err
+	}
+	for i := 0; err != nil && i < 3 && len(data) > 0 && data[len(data)-1] == 0x00; i++ {
+		data = data[:len(data)-1]
+		env = &rtapi.Envelope{}
+		err = proto.Unmarshal(data, env)
+	}
+	return env, err
 }
 
 // deliverAPIChunk buffers a raw API-response chunk and, on the fin frame,

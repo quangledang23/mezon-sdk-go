@@ -55,6 +55,10 @@ type wireFrame struct {
 	code    uint32 // API chunk response code (high 16 bits of the code word)
 	fin     bool   // API chunk fin flag (low 16 bits == 0xFF)
 	payload []byte // envelope bytes or API chunk body
+	// padded marks an abridged frame whose payload still carries 0-3 zero
+	// padding bytes; they are indistinguishable from proto content ending in
+	// 0x00, so the envelope decoder strips them by trial (unmarshalEnvelope).
+	padded bool
 }
 
 // transportConn is one established connection: a framed, message-oriented view
@@ -264,7 +268,7 @@ func (t *tcpConn) readFrameOnce() (*wireFrame, error) {
 		if _, err := io.ReadFull(t.r, payload); err != nil {
 			return nil, err
 		}
-		return &wireFrame{kind: frameEnvelope, payload: trimAbridgedPadding(payload)}, nil
+		return &wireFrame{kind: frameEnvelope, payload: payload, padded: true}, nil
 	}
 }
 
@@ -348,6 +352,14 @@ func readAbridgedLength(r *bufio.Reader, prefix byte) (int, error) {
 }
 
 func (t *tcpConn) writeEnvelope(data []byte) error {
+	// The gateway strips trailing zero bytes as abridged padding, which would
+	// corrupt a proto payload that really ends with 0x00 (e.g. an empty
+	// trailing submessage: ClanJoin{ClanId: 0} -> "1a 00"). Append a benign
+	// unknown varint field (number 2047, value 1) so the payload never ends
+	// with a zero byte; servers ignore unknown fields.
+	if len(data) > 0 && data[len(data)-1] == 0x00 {
+		data = append(data, 0xf8, 0x7f, 0x01)
+	}
 	_, err := t.conn.Write(encodeAbridgedFrame(data))
 	return err
 }
