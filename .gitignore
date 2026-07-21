@@ -42,3 +42,6 @@ smoketest/
 
 # messagedb (SQLite) local message cache
 mezon-cache/
+
+# Local bot credentials — never commit
+bot-info

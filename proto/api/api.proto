@@ -27,6 +27,12 @@ enum Operator {
   DECREMENT = 4;
 }
 
+enum TrackType {
+  AUDIO = 0;
+  VIDEO = 1;
+  DATA = 2;
+}
+
 enum PollType {
   SINGLE = 0;
   MULTIPLE = 1;
@@ -306,6 +312,7 @@ message VoiceChannelUser {
   repeated string user_ids = 1;
   int64 channel_id = 2;
   string room_name = 3;
+  repeated string share_screen_ids = 4;
 }
 
 message VoiceChannelUserList {
@@ -497,6 +504,7 @@ message Session {
   string id_token = 7;
   string ws_url = 8;
   string session_id = 9;
+  string tcp_url = 10;
 }
 
 message UpdateUsernameRequest {
@@ -2159,6 +2167,7 @@ message SdTopicList {
 message ListSdTopicRequest {
   int64 clan_id = 1;
   int32 limit = 2;
+  int32 page = 3;
 }
 
 message SdTopicDetailRequest {
@@ -2476,10 +2485,16 @@ message UpdateAIAgentRequest {
   string room_name = 2;
 }
 
+message TrackInfo {
+  string sid = 1;
+  TrackType type = 2;
+}
+
 message ParticipantInfo {
   string sid = 1;
   string identity = 2;
   ParticipantInfo_State state = 3;
+  repeated TrackInfo tracks = 4;
   bool is_publisher = 13;
   ParticipantInfo_Kind kind = 14;
 }

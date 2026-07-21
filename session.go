@@ -22,6 +22,10 @@ type Session struct {
 	APIURL           string         `json:"api_url"`
 	IDToken          string         `json:"id_token"`
 	WsURL            string         `json:"ws_url"`
+	// TcpURL is the dedicated abridged-TCP gateway endpoint returned by the
+	// server (Session.tcp_url, "abriged url"). Empty on older servers; the
+	// TCP transport then falls back to WsURL / host:port.
+	TcpURL string `json:"tcp_url"`
 }
 
 type apiSessionRaw struct {

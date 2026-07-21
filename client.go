@@ -2,6 +2,7 @@ package mezon
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -176,6 +177,9 @@ func (c *MezonClient) initManagers(basePath string, session *Session) {
 	c.socket = NewDefaultSocket(wsURL, c.Host, c.Port, c.UseSSL, c.events.emit)
 	c.socket.Transport = c.Transport
 	c.socket.TLSInsecureSkipVerify = c.TLSInsecureSkipVerify
+	if session != nil {
+		c.socket.TcpURL = session.TcpURL
+	}
 	// REST API calls prefer the realtime socket once it is open (see
 	// MezonApi.doProtoSocket); until then they go over HTTP.
 	c.apiClient.socket = c.socket
@@ -205,6 +209,7 @@ func (c *MezonClient) Login() error {
 	if err != nil {
 		return err
 	}
+	session.TcpURL = sessApi.TcpUrl
 	c.session = session
 
 	basePath := c.loginBasePath
@@ -239,34 +244,69 @@ func (c *MezonClient) Login() error {
 }
 
 // connectSocket joins clan chats and builds Clan objects, port of
-// socket_manager.connectSocket.
+// socket_manager.connectSocket / runClanInitPipeline: channels are pre-loaded
+// per clan before joining its chat, and failed clans are retried.
 func (c *MezonClient) connectSocket(sessionToken string) error {
 	clans, err := c.apiClient.ListClanDescs(sessionToken, 0, 0, "")
 	if err != nil {
-		return err
+		return fmt.Errorf("listClanDescs failed: %w", err)
 	}
 	type clanInfo struct {
 		id, name, welcome string
 	}
-	list := make([]clanInfo, 0)
+	// The global / DM pseudo-clan "0" goes first, port of fetchClanList.
+	list := []clanInfo{{"0", "", ""}}
 	for _, cl := range clans.GetClandesc() {
 		list = append(list, clanInfo{itoaID(cl.ClanId), cl.ClanName, itoaID(cl.WelcomeChannelId)})
 	}
-	// Give the server a beat after connect before joining clan chats, port of
-	// the sleep(1000) added to socket_manager.connectSocket in mezon-js v2.8.50.
+	// Give the server a beat after connect before joining clan chats.
 	time.Sleep(time.Second)
-	list = append(list, clanInfo{"0", "", ""}) // global / DM pseudo-clan
+	// Build every Clan object up front, port of ensureClanObjects.
 	for _, cl := range list {
-		if _, err := c.socket.JoinClanChat(cl.id); err != nil {
-			// TS aborts connectSocket on a join failure; we log and continue
-			// joining the rest so one bad clan does not block the whole bot.
-			log.Printf("mezon: JoinClanChat(%s) failed: %v", cl.id, err)
-		}
-		time.Sleep(50 * time.Millisecond)
 		if _, ok := c.Clans.Get(cl.id); !ok {
 			clanObj := newClan(cl.id, orString(cl.name, "unknown"), cl.welcome, cl.name, c, sessionToken)
 			c.Clans.Set(cl.id, clanObj)
 		}
+	}
+	// Load each clan's channels, then join its chat, port of
+	// initClanChannelsAndJoin. The pseudo-clan "0" has no channels to load.
+	initClan := func(cl clanInfo) bool {
+		if cl.id != "0" {
+			clanObj, ok := c.Clans.Get(cl.id)
+			if !ok {
+				return false
+			}
+			if err := clanObj.LoadChannels(); err != nil {
+				return false
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		_, err := c.socket.JoinClanChat(cl.id)
+		return err == nil
+	}
+	var failed []clanInfo
+	for _, cl := range list {
+		if !initClan(cl) {
+			failed = append(failed, cl)
+		}
+	}
+	// Up to 5 retry rounds, pacing harder each attempt. The TS widens its
+	// global API rate-limiter delay by 500ms per attempt; without a limiter we
+	// sleep the same amount before each retried clan.
+	for attempt := 1; attempt <= 5 && len(failed) > 0; attempt++ {
+		var still []clanInfo
+		for _, cl := range failed {
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			if !initClan(cl) {
+				still = append(still, cl)
+			}
+		}
+		failed = still
+	}
+	// TS leaves clans that never initialized silently uninitialized; log so a
+	// stuck clan is at least visible.
+	for _, cl := range failed {
+		log.Printf("mezon: init clan %s failed after retries", cl.id)
 	}
 	return nil
 }

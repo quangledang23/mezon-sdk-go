@@ -239,3 +239,26 @@ func TestTakeRawCidTruncatedFallback(t *testing.T) {
 		t.Fatal("pending cid not removed")
 	}
 }
+
+func TestTcpAddrPrefersTcpURL(t *testing.T) {
+	cases := []struct {
+		tcpURL, wsURL, host, port string
+		wantHost, wantPort        string
+	}{
+		{"sock.mezon.ai:8443", "gw.mezon.ai:443", "example.com", "80", "sock.mezon.ai", "8443"},
+		{"tcp://sock.mezon.ai:8443", "", "example.com", "", "sock.mezon.ai", "8443"},
+		{"sock.mezon.ai", "", "example.com", "", "sock.mezon.ai", "443"},
+		{"", "gw.mezon.ai:9000", "example.com", "", "gw.mezon.ai", "9000"},
+		{"", "", "example.com", "8080", "example.com", "8080"},
+		{"", "", "example.com", "", "example.com", "443"},
+	}
+	for _, c := range cases {
+		s := NewDefaultSocket(c.wsURL, c.host, c.port, true, func(string, any) {})
+		s.TcpURL = c.tcpURL
+		h, p := s.tcpAddr()
+		if h != c.wantHost || p != c.wantPort {
+			t.Errorf("tcpAddr(tcp=%q ws=%q host=%q port=%q) = %q:%q, want %q:%q",
+				c.tcpURL, c.wsURL, c.host, c.port, h, p, c.wantHost, c.wantPort)
+		}
+	}
+}

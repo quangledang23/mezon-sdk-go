@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -151,6 +152,11 @@ type DefaultSocket struct {
 	Transport             TransportKind
 	TLSInsecureSkipVerify bool
 
+	// TcpURL is the dedicated abridged-TCP endpoint from Session.tcp_url. When
+	// set, the TCP transport dials it instead of deriving an address from the
+	// websocket URL / host.
+	TcpURL string
+
 	conn    transportConn
 	writeMu sync.Mutex
 
@@ -217,9 +223,20 @@ func (s *DefaultSocket) buildURL(token string, createStatus bool) string {
 	return fmt.Sprintf("%s://%s/ws?%s", scheme, wsHost, q.Encode())
 }
 
-// tcpAddr resolves the TCP transport endpoint from the same fields buildURL
-// uses: session WsURL first, host[:port] otherwise; port defaults to 443.
+// tcpAddr resolves the TCP transport endpoint: the server-provided TcpURL
+// (Session.tcp_url) first, then the same fields buildURL uses — session WsURL,
+// host[:port] otherwise; port defaults to 443.
 func (s *DefaultSocket) tcpAddr() (host, port string) {
+	if addr := s.TcpURL; addr != "" {
+		// Tolerate a scheme prefix (e.g. "tcp://host:port").
+		if i := strings.Index(addr, "://"); i >= 0 {
+			addr = addr[i+3:]
+		}
+		if h, p, err := net.SplitHostPort(addr); err == nil {
+			return h, p
+		}
+		return addr, "443"
+	}
 	if s.wsURL != "" {
 		if h, p, err := net.SplitHostPort(s.wsURL); err == nil {
 			return h, p
