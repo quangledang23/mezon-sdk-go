@@ -170,6 +170,60 @@ func (c *Clan) UpdateRole(req *api.UpdateRoleRequest) error {
 	return c.apiClient.UpdateRole(c.SessionToken, req)
 }
 
+// CreateRole creates a role in this clan and returns it. A zero req.ClanId is
+// filled in from the clan.
+func (c *Clan) CreateRole(req *api.CreateRoleRequest) (*api.Role, error) {
+	if req.ClanId == 0 {
+		req.ClanId = atoiID(c.ID)
+	}
+	return c.apiClient.CreateRole(c.SessionToken, req)
+}
+
+// DeleteRole deletes a role from this clan.
+func (c *Clan) DeleteRole(roleID string) error {
+	return c.apiClient.DeleteRole(c.SessionToken, roleID, c.ID)
+}
+
+// UpdateChannelPrivate makes a channel private (private=true) or public.
+// roleIDs and userIDs keep access when turning private; both may be nil.
+func (c *Clan) UpdateChannelPrivate(channelID string, private bool, roleIDs, userIDs []string) error {
+	req := &api.ChangeChannelPrivateRequest{
+		ClanId:    atoiID(c.ID),
+		ChannelId: atoiID(channelID),
+	}
+	if private {
+		req.ChannelPrivate = 1
+	}
+	for _, id := range roleIDs {
+		req.RoleIds = append(req.RoleIds, atoiID(id))
+	}
+	for _, id := range userIDs {
+		req.UserIds = append(req.UserIds, atoiID(id))
+	}
+	return c.apiClient.UpdateChannelPrivate(c.SessionToken, req)
+}
+
+// AddRolesToChannel grants roles access to a private channel.
+func (c *Clan) AddRolesToChannel(channelID string, roleIDs []string) error {
+	req := &api.AddRoleChannelDescRequest{ChannelId: atoiID(channelID)}
+	for _, id := range roleIDs {
+		req.RoleIds = append(req.RoleIds, atoiID(id))
+	}
+	return c.apiClient.AddRolesChannelDesc(c.SessionToken, req)
+}
+
+// SetRoleChannelPermission sets per-channel permission overrides for a role
+// (req.RoleId) or a user (req.UserId).
+func (c *Clan) SetRoleChannelPermission(req *api.UpdateRoleChannelRequest) error {
+	return c.apiClient.SetRoleChannelPermission(c.SessionToken, req)
+}
+
+// ListPermissions lists the permission definitions known to the server,
+// for mapping slugs like "send-message" to permission ids.
+func (c *Clan) ListPermissions() (*api.PermissionList, error) {
+	return c.apiClient.GetListPermission(c.SessionToken)
+}
+
 // ListChannelVoiceUsers lists users in the clan's voice channels, port of
 // Clan.listChannelVoiceUsers.
 func (c *Clan) ListChannelVoiceUsers(limit int32) (*api.VoiceChannelUserList, error) {

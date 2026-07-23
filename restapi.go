@@ -275,6 +275,49 @@ func (a *MezonApi) UpdateRole(bearer string, req *api.UpdateRoleRequest) error {
 	return a.doProto(bearer, "/mezon.api.Mezon/UpdateRole", req, nil)
 }
 
+// CreateRole creates a clan role and returns it, port of createRole.
+func (a *MezonApi) CreateRole(bearer string, req *api.CreateRoleRequest) (*api.Role, error) {
+	resp := &api.Role{}
+	if err := a.doProto(bearer, "/mezon.api.Mezon/CreateRole", req, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// DeleteRole deletes a clan role, port of deleteRole.
+func (a *MezonApi) DeleteRole(bearer, roleID, clanID string) error {
+	req := &api.DeleteRoleRequest{RoleId: atoiID(roleID), ClanId: atoiID(clanID)}
+	return a.doProto(bearer, "/mezon.api.Mezon/DeleteRole", req, nil)
+}
+
+// UpdateChannelPrivate toggles a channel between public and private, port of
+// updateChannelPrivate. RoleIds/UserIds grant access when turning private.
+func (a *MezonApi) UpdateChannelPrivate(bearer string, req *api.ChangeChannelPrivateRequest) error {
+	return a.doProto(bearer, "/mezon.api.Mezon/UpdateChannelPrivate", req, nil)
+}
+
+// AddRolesChannelDesc grants roles access to a private channel, port of
+// addRolesChannelDesc.
+func (a *MezonApi) AddRolesChannelDesc(bearer string, req *api.AddRoleChannelDescRequest) error {
+	return a.doProto(bearer, "/mezon.api.Mezon/AddRolesChannelDesc", req, nil)
+}
+
+// SetRoleChannelPermission sets per-channel permission overrides for a role or
+// user, port of setRoleChannelPermission.
+func (a *MezonApi) SetRoleChannelPermission(bearer string, req *api.UpdateRoleChannelRequest) error {
+	return a.doProto(bearer, "/mezon.api.Mezon/SetRoleChannelPermission", req, nil)
+}
+
+// GetListPermission lists the permission definitions (id/slug/title) known to
+// the server, port of getListPermission.
+func (a *MezonApi) GetListPermission(bearer string) (*api.PermissionList, error) {
+	resp := &api.PermissionList{}
+	if err := a.doProto(bearer, "/mezon.api.Mezon/GetListPermission", nil, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 // AddQuickMenuAccess adds a quick-menu entry, port of addQuickMenuAccess.
 func (a *MezonApi) AddQuickMenuAccess(bearer string, req *api.QuickMenuAccess) error {
 	return a.doProto(bearer, "/mezon.api.Mezon/AddQuickMenuAccess", req, nil)
