@@ -229,17 +229,27 @@ func (c *MezonClient) Login() error {
 	if err := c.socket.Connect(session, true); err != nil {
 		return err
 	}
-	if err := c.connectSocket(session.Token); err != nil {
+	if err := c.postConnectInit(session.Token); err != nil {
 		return err
 	}
-	if err := c.channelManager.InitAllDMChannels(session.Token); err != nil {
-		// non-fatal, mirror TS which logs and continues
+	c.events.emit(EventReady, nil)
+	return nil
+}
+
+// postConnectInit rebuilds clan/channel state after the socket (re)connects:
+// join clans and load their channels, then discover DM channels and pre-cache
+// them as live TextChannels. Shared by Login and retryConnect, port of the
+// common tail of MezonClientCore.handleClientLogin/handleReconnectSocket.
+// A DM-channel init failure is non-fatal, mirroring the TS which logs and
+// continues.
+func (c *MezonClient) postConnectInit(sessionToken string) error {
+	if err := c.connectSocket(sessionToken); err != nil {
+		return err
+	}
+	if err := c.channelManager.InitAllDMChannels(sessionToken); err != nil {
 		log.Printf("mezon: InitAllDMChannels failed: %v", err)
 	}
-	// Pre-cache discovered DM channels as live TextChannels, port of
-	// MezonClientCore._initDmChannelCache.
 	c.initDmChannelCache()
-	c.events.emit(EventReady, nil)
 	return nil
 }
 
@@ -261,22 +271,28 @@ func (c *MezonClient) connectSocket(sessionToken string) error {
 	}
 	// Give the server a beat after connect before joining clan chats.
 	time.Sleep(time.Second)
-	// Build every Clan object up front, port of ensureClanObjects.
+	// Build every Clan object up front, port of ensureClanObjects. A clan that
+	// already exists (reconnect) is refreshed in place instead of recreated so
+	// its channel/message caches survive, port of the socket_manager reconnect
+	// fix in mezon-js PR #1129.
 	for _, cl := range list {
-		if _, ok := c.Clans.Get(cl.id); !ok {
-			clanObj := newClan(cl.id, orString(cl.name, "unknown"), cl.welcome, cl.name, c, sessionToken)
-			c.Clans.Set(cl.id, clanObj)
+		if existing, ok := c.Clans.Get(cl.id); ok {
+			existing.updateFromDesc(cl.name, cl.welcome, sessionToken)
+			continue
 		}
+		clanObj := newClan(cl.id, orString(cl.name, "unknown"), cl.welcome, cl.name, c, sessionToken)
+		c.Clans.Set(cl.id, clanObj)
 	}
 	// Load each clan's channels, then join its chat, port of
 	// initClanChannelsAndJoin. The pseudo-clan "0" has no channels to load.
+	// ReloadChannels (not LoadChannels) so a reconnect re-fetches the list.
 	initClan := func(cl clanInfo) bool {
 		if cl.id != "0" {
 			clanObj, ok := c.Clans.Get(cl.id)
 			if !ok {
 				return false
 			}
-			if err := clanObj.LoadChannels(); err != nil {
+			if err := clanObj.ReloadChannels(); err != nil {
 				return false
 			}
 			time.Sleep(50 * time.Millisecond)
@@ -328,10 +344,10 @@ func (c *MezonClient) retryConnect() {
 			break
 		}
 		if err := c.socket.Connect(c.session, true); err == nil {
-			if err := c.connectSocket(c.session.Token); err == nil {
+			if err := c.postConnectInit(c.session.Token); err == nil {
 				break
 			} else {
-				log.Printf("mezon: reconnect connectSocket failed: %v", err)
+				log.Printf("mezon: reconnect init failed: %v", err)
 			}
 		} else {
 			log.Printf("mezon: reconnect dial failed, retrying in %s: %v", delay*2, err)

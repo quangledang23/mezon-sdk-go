@@ -144,9 +144,28 @@ func (c *MezonClient) buildChannel(detail *api.ChannelDescription) *TextChannel 
 		clan = newClan(clanID, "unknown", "", "", c, token)
 		c.Clans.Set(clanID, clan)
 	}
-	channel := newTextChannel(detail, clan, c.socket, c.queue)
-	c.Channels.Set(channel.ID, channel)
-	clan.Channels.Set(channel.ID, channel)
+	return c.upsertChannel(clan, detail)
+}
+
+// upsertChannel merges a channel description into the caches: an already
+// cached TextChannel is updated in place — so its Messages cache and any held
+// references survive (e.g. across a reconnect) — and a new one is created
+// otherwise; either way it is (re)registered in both the clan and client
+// caches. Port of the existing-channel reuse added to Clan.fetchAndMergeChannels
+// and MezonClientCore._cacheDmChannel in mezon-js PR #1129.
+func (c *MezonClient) upsertChannel(clan *Clan, desc *api.ChannelDescription) *TextChannel {
+	id := itoaID(desc.ChannelId)
+	channel, ok := clan.Channels.Get(id)
+	if !ok {
+		channel, ok = c.Channels.Get(id)
+	}
+	if ok {
+		channel.updateFromDesc(desc)
+	} else {
+		channel = newTextChannel(desc, clan, c.socket, c.queue)
+	}
+	clan.Channels.Set(id, channel)
+	c.Channels.Set(id, channel)
 	return channel
 }
 

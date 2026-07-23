@@ -37,23 +37,31 @@ type SendOptions struct {
 
 func newTextChannel(d *api.ChannelDescription, clan *Clan, socket *DefaultSocket, queue *AsyncThrottleQueue) *TextChannel {
 	c := &TextChannel{
-		ID:           itoaID(d.ChannelId),
-		Name:         d.ChannelLabel,
-		ChannelType:  int(d.Type),
-		IsPrivate:    d.ChannelPrivate != 0,
-		CategoryID:   itoaID(d.CategoryId),
-		CategoryName: d.CategoryName,
-		ParentID:     itoaID(d.ParentId),
-		MeetingCode:  d.MeetingCode,
-		Clan:         clan,
-		socket:       socket,
-		queue:        queue,
+		ID:     itoaID(d.ChannelId),
+		Clan:   clan,
+		socket: socket,
+		queue:  queue,
 	}
+	c.updateFromDesc(d)
 	// The Messages cache falls back to the optional persistent MessageStore on a
 	// miss, port of the TextChannel messages CacheManager fetcher which reads
 	// from messageDB.getMessageById.
 	c.Messages = NewCacheManager[string, *Message](c.loadMessageFromStore, 200)
 	return c
+}
+
+// updateFromDesc refreshes the channel's fields from a freshly listed
+// description without replacing the object, so the Messages cache and any
+// held references survive a reconnect, port of TextChannel.updateFromDesc
+// (mezon-js PR #1129).
+func (c *TextChannel) updateFromDesc(d *api.ChannelDescription) {
+	c.Name = d.ChannelLabel
+	c.ChannelType = int(d.Type)
+	c.IsPrivate = d.ChannelPrivate != 0
+	c.CategoryID = itoaID(d.CategoryId)
+	c.CategoryName = d.CategoryName
+	c.ParentID = itoaID(d.ParentId)
+	c.MeetingCode = d.MeetingCode
 }
 
 // loadMessageFromStore loads a message from the client's MessageStore, port of
@@ -132,7 +140,11 @@ func (c *TextChannel) createMessageFromAck(ack *rtapi.ChannelMessageAck, data Re
 		queue:       c.queue,
 	}
 	if ack != nil {
-		msg.ID = itoaID(ack.MessageId)
+		// A zero MessageId means the server acked without assigning identity;
+		// leave msg.ID empty rather than encoding the zero as "0".
+		if ack.MessageId != 0 {
+			msg.ID = itoaID(ack.MessageId)
+		}
 		msg.CreateTimeSeconds = ack.CreateTimeSeconds
 		msg.UpdateTimeSeconds = ack.UpdateTimeSeconds
 		msg.Code = int(ack.Code)
@@ -144,7 +156,12 @@ func (c *TextChannel) createMessageFromAck(ack *rtapi.ChannelMessageAck, data Re
 	if raw, err := marshalContent(data.Content); err == nil {
 		msg.Content = json.RawMessage(raw)
 	}
-	c.Messages.Set(msg.ID, msg)
+	// A send that came back without identity (no ack, or a zero message id)
+	// must not be cached: it would pool every such message under one key and
+	// hand out a Message whose Update/Delete target message id 0.
+	if msg.ID != "" {
+		c.Messages.Set(msg.ID, msg)
+	}
 	return msg
 }
 

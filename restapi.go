@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/quangledang23/mezon-sdk-go/api"
+	"github.com/quangledang23/mezon-sdk-go/rtapi"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -171,6 +172,27 @@ func (a *MezonApi) MezonAuthenticate(botID, apiKey string) (*api.Session, error)
 		return nil, err
 	}
 	return sess, nil
+}
+
+// Call invokes an arbitrary /mezon.api.Mezon/ endpoint by API name (see
+// apiname.go for the known names), for endpoints without a dedicated wrapper.
+// req/resp may be nil for empty request/response bodies. Like every API call
+// it rides the realtime socket when open and falls back to HTTP.
+func (a *MezonApi) Call(bearer, apiName string, req, resp proto.Message) error {
+	return a.doProto(bearer, "/mezon.api.Mezon/"+apiName, req, resp)
+}
+
+// SendChannelMessage sends a chat message via the API endpoint, port of
+// client.sendChannelMessageApi (mezon-js v2.15.66). Like the other API
+// methods it rides the realtime socket when open and falls back to HTTP —
+// making it a way to send messages while the socket is down. req.Content
+// must already be the JSON-serialized content string (see marshalContent).
+func (a *MezonApi) SendChannelMessage(bearer string, req *rtapi.ChannelMessageSend) (*rtapi.ChannelMessageAck, error) {
+	resp := &rtapi.ChannelMessageAck{}
+	if err := a.doProto(bearer, "/mezon.api.Mezon/SendChannelMessage", req, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // CreateChannelDesc creates a channel, port of createChannelDesc.

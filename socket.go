@@ -305,7 +305,7 @@ func (s *DefaultSocket) Connect(session *Session, createStatus bool) error {
 	events := make(chan *rtapi.Envelope, eventQueueSize)
 	go s.dispatchLoop(events, done)
 	go s.readLoop(conn, events, done)
-	go s.heartbeatLoop(done)
+	go s.heartbeatLoop(conn, done)
 	return nil
 }
 
@@ -444,7 +444,7 @@ func (s *DefaultSocket) readLoop(conn transportConn, events chan<- *rtapi.Envelo
 	for {
 		f, err := conn.readFrame()
 		if err != nil {
-			s.markDisconnected(err.Error())
+			s.markDisconnected(done, err.Error())
 			return
 		}
 		switch f.kind {
@@ -560,13 +560,21 @@ func (s *DefaultSocket) takeRawCid(cid int32) (chan *socketResponse, bool) {
 	return nil, false
 }
 
-func (s *DefaultSocket) markDisconnected(reason string) {
+// markDisconnected tears down connection state and fires OnDisconnect once.
+// done identifies the caller's connection: when it is no longer the current
+// one (a reconnect already replaced the socket), the call is a stale no-op —
+// the Go equivalent of the connect-attempt-sequence guard added in mezon-js
+// PR #1128.
+func (s *DefaultSocket) markDisconnected(done chan struct{}, reason string) {
+	s.writeMu.Lock()
+	current, closeDone := s.done, s.closeDone
+	s.writeMu.Unlock()
+	if current != done {
+		return
+	}
 	if !s.connected.Swap(false) {
 		return
 	}
-	s.writeMu.Lock()
-	closeDone := s.closeDone
-	s.writeMu.Unlock()
 	if closeDone != nil {
 		closeDone()
 	}
@@ -575,7 +583,10 @@ func (s *DefaultSocket) markDisconnected(reason string) {
 	}
 }
 
-func (s *DefaultSocket) heartbeatLoop(done chan struct{}) {
+// heartbeatLoop pings the server for liveness. conn/done belong to the
+// connection the loop was started for, so a stale loop can never tear down a
+// socket that a reconnect has since installed (port of mezon-js PR #1128).
+func (s *DefaultSocket) heartbeatLoop(conn transportConn, done chan struct{}) {
 	for {
 		select {
 		case <-done:
@@ -584,22 +595,31 @@ func (s *DefaultSocket) heartbeatLoop(done chan struct{}) {
 			if !s.IsOpen() {
 				return
 			}
-			if _, err := s.send(&rtapi.Envelope{Ping: &rtapi.Ping{}}, s.heartbeatTimeout); err != nil {
-				if s.OnHeartbeatTimeout != nil {
-					s.OnHeartbeatTimeout()
-				}
-				// Fire OnDisconnect (via markDisconnected) so the client can
-				// reconnect; Close() would swallow it by flipping connected
-				// first, leaving the socket dead forever.
-				s.markDisconnected("heartbeat timeout: " + err.Error())
-				s.writeMu.Lock()
-				conn := s.conn
-				s.writeMu.Unlock()
-				if conn != nil {
-					_ = conn.close()
-				}
-				return
+			_, err := s.send(&rtapi.Envelope{Ping: &rtapi.Ping{}}, s.heartbeatTimeout)
+			if err == nil {
+				continue
 			}
+			select {
+			case <-done:
+				// This connection was already torn down while the ping was in
+				// flight; whatever replaced it has its own heartbeat.
+				return
+			default:
+			}
+			if s.OnHeartbeatTimeout != nil {
+				s.OnHeartbeatTimeout()
+			}
+			// markDisconnected (not Close) so OnDisconnect fires and the client
+			// can reconnect — Close would swallow it by flipping connected
+			// first, leaving the socket dead forever. It runs before conn.close
+			// so the readLoop (which unblocks on the close) finds connected
+			// already false and cannot report a bogus reason; closing the
+			// captured conn — never the live s.conn — means a socket installed
+			// by a reconnecting OnDisconnect consumer is not at risk (the
+			// hazard mezon-js PR #1128 fixed by closing before the callback).
+			s.markDisconnected(done, "heartbeat timeout: "+err.Error())
+			_ = conn.close()
+			return
 		}
 	}
 }

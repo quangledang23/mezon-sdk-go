@@ -53,6 +53,24 @@ func (c *Clan) LoadChannels() error {
 	if c.channelsLoaded {
 		return nil
 	}
+	return c.reloadChannelsLocked()
+}
+
+// ReloadChannels re-fetches the clan's channels and merges them into the
+// caches even when they were already loaded, so a reconnect picks up channels
+// created or changed while the socket was down, port of Clan.reloadChannels
+// (mezon-js PR #1129).
+func (c *Clan) ReloadChannels() error {
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+	return c.reloadChannelsLocked()
+}
+
+// reloadChannelsLocked fetches the channel list and merges it, updating
+// existing TextChannel objects in place (preserving their Messages caches)
+// and creating the rest, port of Clan.fetchAndMergeChannels. Callers hold
+// loadMu.
+func (c *Clan) reloadChannelsLocked() error {
 	channels, err := c.apiClient.ListChannelDescs(c.SessionToken, int32(ChannelTypeChannel), c.ID, 0, 0, "", false)
 	if err != nil {
 		return err
@@ -61,12 +79,24 @@ func (c *Clan) LoadChannels() error {
 		if ch.ChannelId == 0 {
 			continue
 		}
-		channelObj := newTextChannel(ch, c, c.socket, c.queue)
-		c.Channels.Set(channelObj.ID, channelObj)
-		c.client.Channels.Set(channelObj.ID, channelObj)
+		c.client.upsertChannel(c, ch)
 	}
 	c.channelsLoaded = true
 	return nil
+}
+
+// updateFromDesc refreshes the clan's fields from a freshly listed clan
+// description on reconnect instead of recreating the object, port of
+// Clan.updateFromDesc (mezon-js PR #1129).
+func (c *Clan) updateFromDesc(name, welcomeChannelID, sessionToken string) {
+	if name != "" {
+		c.Name = name
+		c.ClanName = name
+	}
+	if welcomeChannelID != "" {
+		c.WelcomeChannelID = welcomeChannelID
+	}
+	c.SessionToken = sessionToken
 }
 
 // CreateChannelData configures Clan.CreateChannel.

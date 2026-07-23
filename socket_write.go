@@ -1,6 +1,7 @@
 package mezon
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/quangledang23/mezon-sdk-go/api"
@@ -81,12 +82,16 @@ func (s *DefaultSocket) WriteChatMessage(d ReplyMessageData) (*rtapi.ChannelMess
 		return resp.ChannelMessageAck, nil
 	}
 	// Retry once after joining the channel if the server rejects the write with
-	// "must join channel", port of socket_manager.writeChatMessage.
+	// "must join channel", port of socket_manager.writeChatMessage. A failed
+	// auto-join (e.g. the bot is not a member of a private channel) surfaces
+	// alongside the original rejection instead of being swallowed — the TS
+	// SDK likewise propagates the join error.
 	ack, err := send()
 	if err != nil && isMustJoinChannelError(err) {
-		if jerr := s.joinChannelBeforeRetry(d.ClanID, d.ChannelID, d.ChannelType, d.Mode, d.IsPublic); jerr == nil {
-			return send()
+		if jerr := s.joinChannelBeforeRetry(d.ClanID, d.ChannelID, d.ChannelType, d.Mode, d.IsPublic); jerr != nil {
+			return nil, fmt.Errorf("%w (auto-join failed: %v)", err, jerr)
 		}
+		return send()
 	}
 	return ack, err
 }
@@ -132,12 +137,15 @@ func (s *DefaultSocket) WriteEphemeralMessage(d EphemeralMessageData) (*api.Chan
 		return resp.ChannelMessage, nil
 	}
 	// Retry once after joining the channel if the server rejects the write with
-	// "must join channel", port of socket_manager.writeEphemeralMessage.
+	// "must join channel", port of socket_manager.writeEphemeralMessage. A
+	// failed auto-join surfaces alongside the original rejection (see
+	// WriteChatMessage).
 	msg, err := send()
 	if err != nil && isMustJoinChannelError(err) {
-		if jerr := s.joinChannelBeforeRetry(d.ClanID, d.ChannelID, d.ChannelType, d.Mode, d.IsPublic); jerr == nil {
-			return send()
+		if jerr := s.joinChannelBeforeRetry(d.ClanID, d.ChannelID, d.ChannelType, d.Mode, d.IsPublic); jerr != nil {
+			return nil, fmt.Errorf("%w (auto-join failed: %v)", err, jerr)
 		}
+		return send()
 	}
 	return msg, err
 }
