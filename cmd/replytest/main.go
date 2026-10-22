@@ -61,7 +61,7 @@ func main() {
 		log.Fatalf("socket connect (TCP): %v", err)
 	}
 	defer sock.Close()
-	if _, err := sock.JoinClanChat(clanID); err != nil {
+	if _, err := sock.JoinClanChat(clanID, clanID == "0"); err != nil {
 		log.Printf("JoinClanChat(%s): %v (continuing)", clanID, err)
 	}
 

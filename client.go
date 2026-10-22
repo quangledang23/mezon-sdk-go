@@ -6,6 +6,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/quangledang23/mezon-sdk-go/api"
 )
 
 // Default connection settings, port of the constants in MezonClientCore.ts.
@@ -181,7 +183,7 @@ func (c *MezonClient) initManagers(basePath string, session *Session) {
 		c.socket.TcpURL = session.TcpURL
 	}
 	// REST API calls prefer the realtime socket once it is open (see
-	// MezonApi.doProtoSocket); until then they go over HTTP.
+	// MezonApi.doRawSocket); until then they go over HTTP.
 	c.apiClient.socket = c.socket
 	c.socket.OnDisconnect = func(reason string) {
 		if c.hardDisconnect {
@@ -297,7 +299,9 @@ func (c *MezonClient) connectSocket(sessionToken string) error {
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
-		_, err := c.socket.JoinClanChat(cl.id)
+		// The pseudo-clan "0" is sent with is_last_field so its otherwise empty
+		// ClanJoin never ends the abridged frame on a 0x00 byte (mezon-sdk v2.16).
+		_, err := c.socket.JoinClanChat(cl.id, cl.id == "0")
 		return err == nil
 	}
 	var failed []clanInfo
@@ -371,6 +375,53 @@ func (c *MezonClient) Close() {
 
 // Socket returns the underlying socket for advanced/raw realtime calls.
 func (c *MezonClient) Socket() *DefaultSocket { return c.socket }
+
+// Api returns the REST client bound to this MezonClient (nil before Login).
+// Calls need the session token; see SessionToken.
+func (c *MezonClient) Api() *MezonApi { return c.apiClient }
+
+// SessionToken returns the current session's bearer token, or "" before Login.
+func (c *MezonClient) SessionToken() string {
+	if c.session == nil {
+		return ""
+	}
+	return c.session.Token
+}
+
+// CreatePoll creates a poll in a channel, port of MezonClientCore.createPoll.
+func (c *MezonClient) CreatePoll(req *api.CreatePollRequest) (*api.CreatePollResponse, error) {
+	if c.apiClient == nil || c.session == nil {
+		return nil, ErrNotLoggedIn
+	}
+	return c.apiClient.CreatePoll(c.session.Token, req)
+}
+
+// ClosePoll closes a poll, port of MezonClientCore.closePoll. Pass pollID, or
+// messageID + channelID with an empty pollID.
+func (c *MezonClient) ClosePoll(pollID, messageID, channelID string) error {
+	if c.apiClient == nil || c.session == nil {
+		return ErrNotLoggedIn
+	}
+	return c.apiClient.ClosePoll(c.session.Token, pollID, messageID, channelID)
+}
+
+// GetPoll fetches a poll with results, port of MezonClientCore.getPoll. Pass
+// pollID, or messageID + channelID with an empty pollID.
+func (c *MezonClient) GetPoll(pollID, messageID, channelID string) (*api.GetPollResponse, error) {
+	if c.apiClient == nil || c.session == nil {
+		return nil, ErrNotLoggedIn
+	}
+	return c.apiClient.GetPoll(c.session.Token, pollID, messageID, channelID)
+}
+
+// GenerateMeetToken issues an SFU access token for a voice channel, port of
+// MezonClientCore.generateMeetToken.
+func (c *MezonClient) GenerateMeetToken(req *api.GenerateMeetTokenRequest) (*api.GenerateMeetTokenResponse, error) {
+	if c.apiClient == nil || c.session == nil {
+		return nil, ErrNotLoggedIn
+	}
+	return c.apiClient.GenerateMeetToken(c.session.Token, req)
+}
 
 // ChannelManager returns the DM channel manager.
 func (c *MezonClient) ChannelManager() *ChannelManager { return c.channelManager }

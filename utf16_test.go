@@ -38,10 +38,10 @@ func TestMentionSpan(t *testing.T) {
 }
 
 func TestValidateContentLength(t *testing.T) {
-	// 4001 astral chars -> 8002 UTF-16 code units -> over the 8000 limit, even
-	// though it is only 4001 runes.
+	// 2001 astral chars -> 4002 UTF-16 code units -> over the 4000 limit, even
+	// though it is only 2001 runes.
 	big := ""
-	for i := 0; i < 4001; i++ {
+	for i := 0; i < 2001; i++ {
 		big += "😀"
 	}
 	if err := validateContentLength(big); err == nil {

@@ -3,6 +3,7 @@ package mezon
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/quangledang23/mezon-sdk-go/api"
 	"github.com/quangledang23/mezon-sdk-go/rtapi"
@@ -178,26 +179,84 @@ func (s *DefaultSocket) UpdateChannelMessage(d UpdateMessageData) (*rtapi.Channe
 	if err != nil {
 		return nil, err
 	}
-	respBody, err := s.sendApiRequest("UpdateChannelMessage", body)
+	apiIndex, ok := apiIndexFromName("UpdateChannelMessage")
+	if !ok {
+		return nil, fmt.Errorf("mezon: unknown API %q", "UpdateChannelMessage")
+	}
+	// Large edits take the server noticeably longer to acknowledge; the TS
+	// widens the wait to 30s past 1500 encoded bytes.
+	timeout := time.Duration(0)
+	if len(body) > largeUpdateBodyBytes {
+		timeout = largeUpdateTimeout
+	}
+	resp, err := s.sendResponse(&rtapi.Envelope{ApiRequestEvent: &rtapi.ApiRequestEvent{
+		ApiIndex: apiIndex,
+		ApiName:  "UpdateChannelMessage",
+		Body:     body,
+	}}, timeout)
 	if err != nil {
 		return nil, err
 	}
-	updated := &rtapi.ChannelMessageUpdate{}
-	if err := proto.Unmarshal(respBody, updated); err != nil {
-		return nil, err
+	if resp.apiResponse && resp.code != 0 {
+		return nil, fmt.Errorf("mezon: API UpdateChannelMessage failed with code %d", resp.code)
 	}
-	ack := &rtapi.ChannelMessageAck{
-		ChannelId: atoiID(d.ChannelID),
-		MessageId: atoiID(d.MessageID),
-		Code:      1,
+	return ackFromUpdateResponse(resp, atoiID(d.ChannelID), atoiID(d.MessageID))
+}
+
+const (
+	// largeUpdateBodyBytes is the encoded ChannelMessageUpdate size past which
+	// UpdateChannelMessage waits largeUpdateTimeout instead of the default.
+	largeUpdateBodyBytes = 1500
+	largeUpdateTimeout   = 30 * time.Second
+)
+
+// ackFromUpdateResponse normalizes the three shapes the server answers an
+// edit with, port of MezonTransport.ackFromUpdateResponse: the raw API body
+// (an echoed ChannelMessageUpdate), a channel_message_ack envelope, or the
+// pushed channel_message itself (matched to this request by message id, see
+// resolvePendingUpdate). channelID/messageID from the request win over the
+// response's when non-zero, as in the TS.
+func ackFromUpdateResponse(resp *socketResponse, channelID, messageID int64) (*rtapi.ChannelMessageAck, error) {
+	pick := func(req, got int64) int64 {
+		if req != 0 {
+			return req
+		}
+		return got
 	}
-	if ack.ChannelId == 0 {
-		ack.ChannelId = updated.ChannelId
+	if resp.apiResponse {
+		updated := &rtapi.ChannelMessageUpdate{}
+		body := resp.body
+		if err := proto.Unmarshal(body[:protoMessageLength(body)], updated); err != nil {
+			return nil, err
+		}
+		return &rtapi.ChannelMessageAck{
+			ChannelId:         pick(channelID, updated.ChannelId),
+			MessageId:         pick(messageID, updated.MessageId),
+			CreateTimeSeconds: updated.CreateTimeSeconds,
+			Code:              1,
+		}, nil
 	}
-	if ack.MessageId == 0 {
-		ack.MessageId = updated.MessageId
+	env := resp.env
+	if env == nil {
+		return &rtapi.ChannelMessageAck{ChannelId: channelID, MessageId: messageID, Code: 1}, nil
 	}
-	return ack, nil
+	if env.ChannelMessageAck != nil {
+		return env.ChannelMessageAck, nil
+	}
+	if pushed := env.ChannelMessage; pushed != nil {
+		code := pushed.Code
+		if code == 0 {
+			code = 1
+		}
+		return &rtapi.ChannelMessageAck{
+			ChannelId:         pick(pushed.ChannelId, channelID),
+			MessageId:         pick(pushed.MessageId, messageID),
+			CreateTimeSeconds: pushed.CreateTimeSeconds,
+			UpdateTimeSeconds: pushed.UpdateTimeSeconds,
+			Code:              code,
+		}, nil
+	}
+	return &rtapi.ChannelMessageAck{ChannelId: channelID, MessageId: messageID, Code: 1}, nil
 }
 
 // DeleteChannelMessage deletes a message via an API request over the socket,
@@ -261,11 +320,11 @@ func (s *DefaultSocket) UpdateChatMessage(d UpdateMessageData) (*rtapi.ChannelMe
 		IsUpdateMsgTopic:  d.IsUpdateMsgTopic,
 		CreateTimeSeconds: d.CreateTimeSeconds,
 	}}
-	resp, err := s.send(env, 0)
+	resp, err := s.sendResponse(env, 0)
 	if err != nil {
 		return nil, err
 	}
-	return resp.ChannelMessageAck, nil
+	return ackFromUpdateResponse(resp, atoiID(d.ChannelID), atoiID(d.MessageID))
 }
 
 // WriteMessageReaction adds or removes a reaction, port of socket.writeMessageReaction.
@@ -308,8 +367,11 @@ func (s *DefaultSocket) RemoveChatMessage(d RemoveMessageData) (*rtapi.ChannelMe
 }
 
 // JoinClanChat joins a clan's realtime chat, port of socket.joinClanChat.
-func (s *DefaultSocket) JoinClanChat(clanID string) (*rtapi.ClanJoin, error) {
-	resp, err := s.send(&rtapi.Envelope{ClanJoin: &rtapi.ClanJoin{ClanId: atoiID(clanID)}}, 0)
+// isLastField sets ClanJoin.is_last_field; socket_manager passes true for the
+// pseudo-clan "0", whose ClanJoin would otherwise encode as an empty
+// submessage and end the abridged frame on a 0x00 byte.
+func (s *DefaultSocket) JoinClanChat(clanID string, isLastField bool) (*rtapi.ClanJoin, error) {
+	resp, err := s.send(&rtapi.Envelope{ClanJoin: &rtapi.ClanJoin{ClanId: atoiID(clanID), IsLastField: isLastField}}, 0)
 	if err != nil {
 		return nil, err
 	}

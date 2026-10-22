@@ -52,22 +52,39 @@ func NewMezonApi(apiKey, basePath string, timeout time.Duration) *MezonApi {
 // doProto sends a protobuf request to path and decodes the protobuf response,
 // preferring the realtime socket and falling back to HTTP POST.
 func (a *MezonApi) doProto(bearer, path string, req, resp proto.Message) error {
+	data, err := a.doRaw(bearer, path, req)
+	if err != nil {
+		return err
+	}
+	if resp != nil && len(data) > 0 {
+		// An abridged API response may carry 0x00 alignment padding that a
+		// strict decoder rejects; cut at the end of the well-formed message.
+		return proto.Unmarshal(data[:protoMessageLength(data)], resp)
+	}
+	return nil
+}
+
+// doRaw sends a protobuf request to path and returns the undecoded response
+// body, preferring the realtime socket and falling back to HTTP POST. It is
+// the shared core of doProto, and used directly by endpoints whose body is
+// not (always) a proto message (see GenerateMeetToken).
+func (a *MezonApi) doRaw(bearer, path string, req proto.Message) ([]byte, error) {
 	var body []byte
 	if req != nil {
 		b, err := proto.Marshal(req)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		body = b
 	}
-	if handled, err := a.doProtoSocket(path, body, resp); handled {
-		return err
+	if data, handled, err := a.doRawSocket(path, body); handled {
+		return data, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), a.Timeout)
 	defer cancel()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.BasePath+path, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/proto")
 	httpReq.Header.Set("Accept", "application/proto")
@@ -76,58 +93,52 @@ func (a *MezonApi) doProto(bearer, path string, req, resp proto.Message) error {
 	}
 	res, err := a.client.Do(httpReq)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusNoContent {
-		return nil
+		return nil, nil
 	}
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if res.StatusCode >= 400 {
-		return fmt.Errorf("mezon api %s: status %d: %s", path, res.StatusCode, string(data))
+		return nil, fmt.Errorf("mezon api %s: status %d: %s", path, res.StatusCode, string(data))
 	}
-	if resp != nil && len(data) > 0 {
-		return proto.Unmarshal(data, resp)
-	}
-	return nil
+	return data, nil
 }
 
 // AttachSocket routes this client's /mezon.api.Mezon/ requests over the given
-// realtime socket whenever it is open (see doProtoSocket). MezonClient wires
+// realtime socket whenever it is open (see doRawSocket). MezonClient wires
 // this up automatically; it is exported for low-level socket users.
 func (a *MezonApi) AttachSocket(s *DefaultSocket) { a.socket = s }
 
-// doProtoSocket routes a /mezon.api.Mezon/ request over the realtime socket.
+// doRawSocket routes a /mezon.api.Mezon/ request over the realtime socket.
 // handled=false means the caller must fall back to HTTP: the socket is unset
 // or down, the endpoint has no ApiNameEnum index, or the send failed at the
 // transport level. An API-level failure (non-zero response code) is a real
 // server answer and is returned as the final error, not retried over HTTP.
-func (a *MezonApi) doProtoSocket(path string, body []byte, resp proto.Message) (bool, error) {
+func (a *MezonApi) doRawSocket(path string, body []byte) ([]byte, bool, error) {
 	s := a.socket
 	if s == nil || !s.IsOpen() {
-		return false, nil
+		return nil, false, nil
 	}
 	name := strings.TrimPrefix(path, "/mezon.api.Mezon/")
 	if name == path {
-		return false, nil
+		return nil, false, nil
 	}
 	if _, ok := apiIndexFromName(name); !ok {
-		return false, nil
+		return nil, false, nil
 	}
 	respBody, err := s.sendApiRequest(name, body)
 	if err != nil {
 		if errors.Is(err, ErrSocketClosed) || errors.Is(err, ErrSendTimeout) {
-			return false, nil
+			return nil, false, nil
 		}
-		return true, err
+		return nil, true, err
 	}
-	if resp != nil && len(respBody) > 0 {
-		return true, proto.Unmarshal(respBody, resp)
-	}
-	return true, nil
+	return respBody, true, nil
 }
 
 // MezonAuthenticate authenticates an app/bot and returns its session, port of
@@ -331,6 +342,72 @@ func (a *MezonApi) ListQuickMenuAccess(bearer, botID, channelID string, menuType
 		return nil, err
 	}
 	return resp, nil
+}
+
+// CreatePoll creates a poll in a channel, port of createPoll (mezon-sdk
+// v2.16). Zero ids are sent as 0, matching the TS "0" defaults. Bots may call
+// every poll endpoint except VotePoll.
+func (a *MezonApi) CreatePoll(bearer string, req *api.CreatePollRequest) (*api.CreatePollResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("mezon: CreatePoll requires a request body")
+	}
+	resp := &api.CreatePollResponse{}
+	if err := a.doProto(bearer, "/mezon.api.Mezon/CreatePoll", req, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// ClosePoll closes a poll (creator only), port of closePoll. The poll is
+// located by pollID, or by messageID + channelID when pollID is empty.
+func (a *MezonApi) ClosePoll(bearer, pollID, messageID, channelID string) error {
+	req := &api.ClosePollRequest{PollId: atoiID(pollID), MessageId: atoiID(messageID), ChannelId: atoiID(channelID)}
+	return a.doProto(bearer, "/mezon.api.Mezon/ClosePoll", req, nil)
+}
+
+// GetPoll returns a poll with its current results and voter details, port of
+// getPoll. The poll is located by pollID, or by messageID + channelID when
+// pollID is empty.
+func (a *MezonApi) GetPoll(bearer, pollID, messageID, channelID string) (*api.GetPollResponse, error) {
+	req := &api.GetPollRequest{PollId: atoiID(pollID), MessageId: atoiID(messageID), ChannelId: atoiID(channelID)}
+	resp := &api.GetPollResponse{}
+	if err := a.doProto(bearer, "/mezon.api.Mezon/GetPoll", req, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// GenerateMeetToken issues an SFU (voice/meeting) access token for a channel,
+// port of generateMeetToken. The server answers either with a
+// GenerateMeetTokenResponse proto or, on older deployments, with the bare JWT
+// text; both shapes are normalized into the response struct
+// (decodeGenerateMeetTokenResponse in api.ts).
+func (a *MezonApi) GenerateMeetToken(bearer string, req *api.GenerateMeetTokenRequest) (*api.GenerateMeetTokenResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("mezon: GenerateMeetToken requires a request body")
+	}
+	data, err := a.doRaw(bearer, "/mezon.api.Mezon/GenerateMeetToken", req)
+	if err != nil {
+		return nil, err
+	}
+	return decodeGenerateMeetTokenResponse(data), nil
+}
+
+// decodeGenerateMeetTokenResponse treats the body as a proto when it starts
+// with the tag of field 1 or 2 (0x0a / 0x12) and decodes cleanly; anything
+// else is the raw token text.
+func decodeGenerateMeetTokenResponse(data []byte) *api.GenerateMeetTokenResponse {
+	body := trimAbridgedPadding(data)
+	if len(body) == 0 {
+		return &api.GenerateMeetTokenResponse{}
+	}
+	if body[0] == 0x0a || body[0] == 0x12 {
+		resp := &api.GenerateMeetTokenResponse{}
+		if proto.Unmarshal(body, resp) == nil {
+			return resp
+		}
+	}
+	return &api.GenerateMeetTokenResponse{Token: string(body)}
 }
 
 // PlayMedia posts a play-media request to the streaming server, port of playMedia.

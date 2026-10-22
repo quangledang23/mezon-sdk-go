@@ -59,6 +59,10 @@ type wireFrame struct {
 	// padding bytes; they are indistinguishable from proto content ending in
 	// 0x00, so the envelope decoder strips them by trial (unmarshalEnvelope).
 	padded bool
+	// websocket marks an envelope that arrived as an RFC 6455 frame on the TCP
+	// stream (server pushes); only that path may carry a bare ChannelMessage
+	// instead of an Envelope (see unwrapBareChannelMessage).
+	websocket bool
 }
 
 // transportConn is one established connection: a framed, message-oriented view
@@ -139,6 +143,9 @@ func (w *wsConn) close() error { return w.conn.Close() }
 type tcpConn struct {
 	conn net.Conn
 	r    *bufio.Reader
+	// started flips after the first inbound byte has been inspected (see the
+	// HTTP-on-TCP-port check in readFrameOnce).
+	started bool
 }
 
 // dialTCP connects, performs the TLS handshake when useSSL is set, and sends
@@ -220,6 +227,16 @@ func (t *tcpConn) readFrame() (*wireFrame, error) {
 // readFrameOnce reads one wire frame; it returns (nil, nil) after consuming a
 // frame that carries no envelope (WebSocket control frames).
 func (t *tcpConn) readFrameOnce() (*wireFrame, error) {
+	if !t.started {
+		// A plain HTTP server answering on the abridged port would otherwise
+		// be read as a 288-byte abridged frame ('H' = 0x48) of garbage; fail
+		// with a clear reason instead (port of the "HTTP/" check in
+		// MezonNetworkAdapter).
+		if head, err := t.r.Peek(5); err == nil && string(head) == "HTTP/" {
+			return nil, fmt.Errorf("mezon: server returned HTTP on the abridged TCP port")
+		}
+		t.started = true
+	}
 	prefix, err := t.r.ReadByte()
 	if err != nil {
 		return nil, err
@@ -322,7 +339,7 @@ func (t *tcpConn) readWebSocketFrame(first byte) (*wireFrame, error) {
 	}
 	switch opcode {
 	case wsOpBinary, wsOpText:
-		return &wireFrame{kind: frameEnvelope, payload: payload}, nil
+		return &wireFrame{kind: frameEnvelope, payload: payload, websocket: true}, nil
 	case wsOpClose:
 		return nil, fmt.Errorf("mezon: server sent websocket close frame")
 	default:

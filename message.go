@@ -118,6 +118,17 @@ func (m *Message) Reply(content Content, opts *SendOptions) (*Message, error) {
 // and returns it.
 func (m *Message) Update(content Content, mentions []Mention, attachments []Attachment) (*Message, error) {
 	return Enqueue(m.queue, func() (*Message, error) {
+		// The cached copy may carry server timestamps this instance missed
+		// (e.g. a Message built from a send ack before the push arrived); the
+		// server validates create_time_seconds on edit (mezon-sdk v2.16).
+		if cached, ok := m.Channel.Messages.Get(m.ID); ok && cached != m {
+			if cached.CreateTimeSeconds != 0 {
+				m.CreateTimeSeconds = cached.CreateTimeSeconds
+			}
+			if cached.UpdateTimeSeconds != 0 {
+				m.UpdateTimeSeconds = cached.UpdateTimeSeconds
+			}
+		}
 		topic := m.TopicID
 		if topic == "" {
 			topic = "0"
@@ -136,8 +147,17 @@ func (m *Message) Update(content Content, mentions []Mention, attachments []Atta
 			TopicID:           topic,
 			IsUpdateMsgTopic:  m.TopicID != "",
 		}
-		if _, err := m.socket.UpdateChannelMessage(data); err != nil {
+		ack, err := m.socket.UpdateChannelMessage(data)
+		if err != nil {
 			return nil, err
+		}
+		if ack != nil {
+			if ack.CreateTimeSeconds != 0 {
+				m.CreateTimeSeconds = ack.CreateTimeSeconds
+			}
+			if ack.UpdateTimeSeconds != 0 {
+				m.UpdateTimeSeconds = ack.UpdateTimeSeconds
+			}
 		}
 		if raw, err := marshalContent(content); err == nil {
 			m.Content = json.RawMessage(raw)

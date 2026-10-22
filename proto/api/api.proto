@@ -313,6 +313,7 @@ message VoiceChannelUser {
   int64 channel_id = 2;
   string room_name = 3;
   repeated string share_screen_ids = 4;
+  repeated int32 peer_ids = 5;
 }
 
 message VoiceChannelUserList {
@@ -608,6 +609,7 @@ message ClanDesc {
   string short_url = 16;
   bool prevent_anonymous = 17;
   bool has_unread_message = 18;
+  string hashtags = 19;
 }
 
 message CreateClanDescRequest {
@@ -631,6 +633,7 @@ message UpdateClanDescRequest {
   google.protobuf.StringValue about = 12;
   google.protobuf.StringValue short_url = 13;
   bool prevent_anonymous = 14;
+  google.protobuf.StringValue hashtags = 15;
 }
 
 message DeleteClanDescRequest {
@@ -1258,6 +1261,8 @@ message UploadAttachmentRequest {
   int32 width = 4;
   int32 height = 5;
   int32 part_count = 6;
+  int64 channel_id = 7;
+  bool transcode_hls = 8;
 }
 
 message ListMessageMentionRequest {
@@ -1269,12 +1274,14 @@ message ListMessageMentionRequest {
 message UploadAttachment {
   string filename = 1;
   string url = 2;
+  int32 type_cdn = 3;
 }
 
 message MultipartUploadAttachment {
   string filename = 1;
   repeated string urls = 2;
   string upload_id = 3;
+  int32 type_cdn = 4;
 }
 
 message MultipartUploadAttachmentPart {
@@ -2183,17 +2190,18 @@ message DeleteSdTopicRequest {
 message GenerateMeetTokenRequest {
   int64 channel_id = 1;
   string room_name = 2;
+  string metadata = 3;
 }
 
 message MeetParticipantRequest {
-  string username = 1;
-  string room_name = 2;
-  int64 channel_id = 3;
-  int64 clan_id = 4;
+  int64 user_id = 1;
+  int64 channel_id = 2;
+  int64 clan_id = 3;
 }
 
 message GenerateMeetTokenResponse {
   string token = 1;
+  string url = 2;
 }
 
 message GenerateMezonMeetResponse {
@@ -2292,6 +2300,7 @@ message Message2InboxRequest {
   repeated MessageAttachment attachments = 7;
   repeated MessageReaction reactions = 8;
   repeated MessageRef references = 9;
+  int64 topic_id = 10;
 }
 
 message AccountEmail {
@@ -2405,6 +2414,7 @@ message DirectFcmProto {
   bool has_more_attachment = 17;
   repeated bool is_mention_role = 18;
   int64 message_id = 19;
+  int64 topic_id = 20;
 }
 
 message MessageMentionList {
@@ -2457,6 +2467,7 @@ message ClanDiscover {
   string about = 10;
   string short_url = 11;
   uint32 create_time_seconds = 12;
+  string hashtags = 13;
 }
 
 message ListClanDiscover {
@@ -2469,6 +2480,7 @@ message GenerateMeetTokenExternalResponse {
   string token = 1;
   int64 guest_user_id = 2;
   string guest_access_token = 3;
+  string url = 4;
 }
 
 message KafkaActionMsg {
@@ -2680,6 +2692,43 @@ message ListUserOnlineRequest {
 message ListUserOnlineResponse {
   repeated User users = 1;
   int32 total_count = 2;
+}
+
+message SearchCtrlKRequest {
+  string text = 1;
+  int32 type = 2;
+}
+
+message SearchCtrlKResponse {
+  repeated User users = 1;
+  repeated ChannelDescription channels = 2;
+}
+
+message SearchMentionUsersRequest {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  string text = 3;
+}
+
+message MentionUser {
+  int64 id = 1;
+  string username = 2;
+  string display_name = 3;
+  string avatar_url = 4;
+  string clan_nick = 5;
+  string clan_avatar = 6;
+}
+
+message SearchMentionUsersResponse {
+  repeated MentionUser users = 1;
+}
+
+message GenerateCDNSignatureRequest {
+  int64 channel_id = 1;
+}
+
+message GenerateCDNSignatureResponse {
+  string signature = 1;
 }
 
 message NoParams {

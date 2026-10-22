@@ -48,7 +48,7 @@ Mirrors `MezonClientCore.login`:
 > are measured in UTF-16 code units, not bytes or runes. This port does the
 > same:
 >
-> - The 8000-character content limit is checked with `UTF16Len(JSON(content))`,
+> - The 4000-character content limit is checked with `UTF16Len(JSON(content))`,
 >   exactly matching the JS `JSON.stringify(content).length` guard.
 > - Use `mezon.MentionSpan(text, substr)` to compute a mention's `S`/`E` so a
 >   leading emoji or CJK text shifts the offset by the right amount.
@@ -67,7 +67,15 @@ Helpers: `UTF16Len`, `UTF16Encode`, `RuneIndexToUTF16`, `MentionSpan`.
 
 `TextChannel.Send` / `SendEphemeral`, and on a cached `Message`:
 `Reply`, `Update`, `React`, `Delete`. `User.SendDM` sends a direct message.
+`Update` refreshes the message's `CreateTimeSeconds`/`UpdateTimeSeconds` from the
+server ack; an edit may be acknowledged by the pushed `channel_message` itself,
+which the socket matches back to the waiting request by message id.
 All writes are serialized through an `AsyncThrottleQueue` (80/sec, like the TS SDK).
+
+Polls (mezon-sdk v2.16): `client.CreatePoll`, `client.GetPoll`, `client.ClosePoll`
+(bots may use every poll endpoint except voting), and `client.GenerateMeetToken`
+for SFU access tokens. Other REST endpoints are reachable through `client.Api()`
+with `client.SessionToken()`.
 
 ## Events
 

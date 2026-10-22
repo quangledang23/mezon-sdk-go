@@ -214,6 +214,7 @@ var apiNames = []string{
 	"DeletePinMessage",
 	"MarkAsRead",
 	"UploadBatchAttachmentFile",
+	"SearchCtrlK",
 }
 
 var apiNameIndex = func() map[string]int32 {

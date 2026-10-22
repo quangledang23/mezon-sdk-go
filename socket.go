@@ -11,12 +11,15 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/quangledang23/mezon-sdk-go/api"
 	"github.com/quangledang23/mezon-sdk-go/rtapi"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 const (
-	defaultHeartbeatTimeout = 10 * time.Second
+	defaultHeartbeatTimeout = 15 * time.Second
 	defaultSendTimeout      = 10 * time.Second
 	defaultConnectTimeout   = 30 * time.Second
 	// eventQueueSize buffers server-pushed events between the read loop and the
@@ -160,9 +163,11 @@ type DefaultSocket struct {
 	conn    transportConn
 	writeMu sync.Mutex
 
-	cidMu   sync.Mutex
-	cids    map[int32]chan *socketResponse
-	nextCid int32
+	cidMu sync.Mutex
+	cids  map[int32]chan *socketResponse
+	// pendingUpdates tracks in-flight edits by cid (see pendingUpdate).
+	pendingUpdates map[int32]pendingUpdate
+	nextCid        int32
 
 	heartbeatTimeout time.Duration
 	sendTimeout      time.Duration
@@ -192,6 +197,7 @@ func NewDefaultSocket(wsURL, host, port string, useSSL bool, emit func(string, a
 		port:             port,
 		useSSL:           useSSL,
 		cids:             make(map[int32]chan *socketResponse),
+		pendingUpdates:   make(map[int32]pendingUpdate),
 		nextCid:          1,
 		heartbeatTimeout: defaultHeartbeatTimeout,
 		sendTimeout:      defaultSendTimeout,
@@ -336,8 +342,95 @@ func (s *DefaultSocket) Close() {
 	}
 }
 
+// maxCid is the largest correlation id put on the wire. Raw API frames and
+// TCP ping frames carry the cid as a uint16, so the counter wraps back to 1
+// once it reaches 65535, port of MezonTransport.generatecid.
+const maxCid = 65535
+
 func (s *DefaultSocket) generateCid() int32 {
-	return atomic.AddInt32(&s.nextCid, 1) - 1
+	for {
+		cur := atomic.LoadInt32(&s.nextCid)
+		next := cur + 1
+		if cur >= maxCid {
+			next = 1
+		}
+		if atomic.CompareAndSwapInt32(&s.nextCid, cur, next) {
+			return cur
+		}
+	}
+}
+
+// pendingUpdate records which message an in-flight UpdateChannelMessage /
+// channel_message_update request edits, port of PromiseExecutor.awaitingUpdate.
+// The server sometimes answers an edit not on the request's cid but with a
+// cid-less channel_message (or channel_message_ack) push for that message id;
+// readLoop matches such a push against these and resolves the waiting sender.
+type pendingUpdate struct {
+	messageID int64
+	channelID int64
+}
+
+// awaitingUpdateMeta extracts the edited message identity from an outbound
+// envelope, port of getAwaitingUpdateMeta. nil for anything but an edit.
+func awaitingUpdateMeta(env *rtapi.Envelope) *pendingUpdate {
+	if u := env.ChannelMessageUpdate; u != nil {
+		return &pendingUpdate{messageID: u.MessageId, channelID: u.ChannelId}
+	}
+	if ev := env.ApiRequestEvent; ev != nil && ev.ApiName == "UpdateChannelMessage" && len(ev.Body) > 0 {
+		u := &rtapi.ChannelMessageUpdate{}
+		if proto.Unmarshal(ev.Body, u) == nil && u.MessageId != 0 {
+			return &pendingUpdate{messageID: u.MessageId, channelID: u.ChannelId}
+		}
+	}
+	return nil
+}
+
+// resolvePendingUpdate hands a cid-less channel_message / channel_message_ack
+// push to the sender of a matching in-flight edit, port of
+// tryResolvePendingUpdate. It reports whether a sender was resolved; the push
+// is still dispatched as an event either way (the TS does the same).
+func (s *DefaultSocket) resolvePendingUpdate(env *rtapi.Envelope) bool {
+	var msgID, chanID int64
+	switch {
+	case env.ChannelMessage != nil:
+		msgID, chanID = env.ChannelMessage.MessageId, env.ChannelMessage.ChannelId
+	case env.ChannelMessageAck != nil:
+		msgID, chanID = env.ChannelMessageAck.MessageId, env.ChannelMessageAck.ChannelId
+	}
+	if msgID == 0 {
+		return false
+	}
+	s.cidMu.Lock()
+	defer s.cidMu.Unlock()
+	if len(s.pendingUpdates) == 0 {
+		return false
+	}
+	match := int32(-1)
+	for cid, p := range s.pendingUpdates {
+		if p.messageID != msgID {
+			continue
+		}
+		if p.channelID != 0 && chanID != 0 && p.channelID != chanID {
+			// Same message id in another channel only counts when it is the
+			// sole edit in flight (the TS single-pending fallback).
+			if len(s.pendingUpdates) != 1 {
+				continue
+			}
+		}
+		match = cid
+		break
+	}
+	if match < 0 {
+		return false
+	}
+	delete(s.pendingUpdates, match)
+	ch, ok := s.cids[match]
+	if !ok {
+		return false
+	}
+	delete(s.cids, match)
+	ch <- &socketResponse{env: env}
+	return true
 }
 
 // send writes an envelope and waits for the cid-correlated Envelope response.
@@ -387,9 +480,13 @@ func (s *DefaultSocket) sendResponse(env *rtapi.Envelope, timeout time.Duration)
 	cid := s.generateCid()
 	env.Cid = cid
 	ch := make(chan *socketResponse, 1)
+	awaiting := awaitingUpdateMeta(env)
 
 	s.cidMu.Lock()
 	s.cids[cid] = ch
+	if awaiting != nil {
+		s.pendingUpdates[cid] = *awaiting
+	}
 	s.cidMu.Unlock()
 
 	data, err := proto.Marshal(env)
@@ -433,6 +530,18 @@ func (s *DefaultSocket) sendResponse(env *rtapi.Envelope, timeout time.Duration)
 func (s *DefaultSocket) clearCid(cid int32) {
 	s.cidMu.Lock()
 	delete(s.cids, cid)
+	delete(s.pendingUpdates, cid)
+	s.cidMu.Unlock()
+}
+
+// clearAllCids drops every pending request registration. Senders blocked in
+// sendResponse have already been released through the connection's done
+// channel; this only frees the bookkeeping (port of the executor sweep in
+// MezonTransport.markDisconnected).
+func (s *DefaultSocket) clearAllCids() {
+	s.cidMu.Lock()
+	s.cids = make(map[int32]chan *socketResponse)
+	s.pendingUpdates = make(map[int32]pendingUpdate)
 	s.cidMu.Unlock()
 }
 
@@ -470,6 +579,12 @@ func (s *DefaultSocket) readLoop(conn transportConn, events chan<- *rtapi.Envelo
 				}
 				continue
 			}
+			if f.websocket {
+				env = unwrapBareChannelMessage(env, f.payload)
+			}
+			// An edit may be answered by the pushed message itself instead of
+			// a cid'd response; resolve that sender, then dispatch as usual.
+			s.resolvePendingUpdate(env)
 			select {
 			case events <- env:
 			case <-done:
@@ -496,6 +611,64 @@ func unmarshalEnvelope(f *wireFrame) (*rtapi.Envelope, error) {
 		err = proto.Unmarshal(data, env)
 	}
 	return env, err
+}
+
+// unwrapBareChannelMessage handles the legacy server shape on the WebSocket
+// framed push path, port of MezonNetworkAdapter.dispatchRawChannelMessage:
+// some pushes are a bare api.ChannelMessage rather than an Envelope. A bare
+// message still "decodes" as an Envelope (proto is lenient) but yields no cid
+// and no event field; in that case re-decode it as a ChannelMessage and wrap
+// it. Anything that does not look like a real message is returned unchanged.
+func unwrapBareChannelMessage(env *rtapi.Envelope, payload []byte) *rtapi.Envelope {
+	if env.Cid != 0 || envelopeHasEvent(env) {
+		return env
+	}
+	cm := &api.ChannelMessage{}
+	if proto.Unmarshal(trimAbridgedPadding(payload), cm) != nil || cm.MessageId == 0 || cm.ChannelId == 0 {
+		return env
+	}
+	return &rtapi.Envelope{ChannelMessage: cm}
+}
+
+// envelopeHasEvent reports whether any field other than cid is populated,
+// port of getEnvelopeEventKeys(...).length > 0.
+func envelopeHasEvent(env *rtapi.Envelope) bool {
+	found := false
+	env.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+		if fd.Name() == "cid" {
+			return true
+		}
+		found = true
+		return false
+	})
+	return found
+}
+
+// protoMessageLength returns the length of the leading well-formed protobuf
+// message in b, port of protobufMessageLength: an abridged API response may
+// carry up to three 0x00 alignment bytes that a strict decoder rejects as an
+// invalid tag. Scanning stops at the first zero tag byte and treats the rest as
+// padding; a truncated field means the body is not padded and is kept whole.
+func protoMessageLength(b []byte) int {
+	pos := 0
+	for pos < len(b) {
+		num, typ, n := protowire.ConsumeTag(b[pos:])
+		if n < 0 {
+			if b[pos] == 0x00 {
+				return pos
+			}
+			return len(b)
+		}
+		if typ == protowire.StartGroupType || typ == protowire.EndGroupType {
+			return pos
+		}
+		m := protowire.ConsumeFieldValue(num, typ, b[pos+n:])
+		if m < 0 {
+			return len(b)
+		}
+		pos += n + m
+	}
+	return pos
 }
 
 // deliverAPIChunk buffers a raw API-response chunk and, on the fin frame,
@@ -537,6 +710,7 @@ func (s *DefaultSocket) takeCid(cid int32) (chan *socketResponse, bool) {
 	ch, ok := s.cids[cid]
 	if ok {
 		delete(s.cids, cid)
+		delete(s.pendingUpdates, cid)
 	}
 	return ch, ok
 }
@@ -549,11 +723,13 @@ func (s *DefaultSocket) takeRawCid(cid int32) (chan *socketResponse, bool) {
 	defer s.cidMu.Unlock()
 	if ch, ok := s.cids[cid]; ok {
 		delete(s.cids, cid)
+		delete(s.pendingUpdates, cid)
 		return ch, true
 	}
 	for k, ch := range s.cids {
 		if int32(uint16(k)) == cid {
 			delete(s.cids, k)
+			delete(s.pendingUpdates, k)
 			return ch, true
 		}
 	}
@@ -578,6 +754,7 @@ func (s *DefaultSocket) markDisconnected(done chan struct{}, reason string) {
 	if closeDone != nil {
 		closeDone()
 	}
+	s.clearAllCids()
 	if s.OnDisconnect != nil {
 		s.OnDisconnect(reason)
 	}
