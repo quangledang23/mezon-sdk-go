@@ -15,8 +15,11 @@ type Clan struct {
 	WelcomeChannelID string
 	ClanName         string
 	Channels         *CacheManager[string, *TextChannel]
-	SessionToken     string
-	ClientID         string
+	// SessionToken is the session token the clan last saw. The clan's own
+	// calls renew the session as needed; prefer MezonClient.EnsureValidSession
+	// over reading this for a token of your own.
+	SessionToken string
+	ClientID     string
 
 	apiClient *MezonApi
 	socket    *DefaultSocket
@@ -46,6 +49,21 @@ func newClan(id, name, welcomeChannelID, clanName string, client *MezonClient, s
 	return c
 }
 
+// validSessionToken returns the bearer token for the clan's REST calls,
+// renewing the session first when it is about to expire, port of
+// Clan.getValidSessionToken (mezon-sdk v2.8.65). A clan whose client holds no
+// session falls back to the token it was built with.
+func (c *Clan) validSessionToken() (string, error) {
+	if c.client == nil || c.client.currentSession() == nil {
+		return c.SessionToken, nil
+	}
+	session, err := c.client.ensureValidSession(sessionExpiryBuffer, false)
+	if err != nil {
+		return "", err
+	}
+	return session.Token, nil
+}
+
 // LoadChannels loads the clan's text channels once, port of Clan.loadChannels.
 func (c *Clan) LoadChannels() error {
 	c.loadMu.Lock()
@@ -71,7 +89,11 @@ func (c *Clan) ReloadChannels() error {
 // and creating the rest, port of Clan.fetchAndMergeChannels. Callers hold
 // loadMu.
 func (c *Clan) reloadChannelsLocked() error {
-	channels, err := c.apiClient.ListChannelDescs(c.SessionToken, int32(ChannelTypeChannel), c.ID, 0, 0, "", false)
+	token, err := c.validSessionToken()
+	if err != nil {
+		return err
+	}
+	channels, err := c.apiClient.ListChannelDescs(token, int32(ChannelTypeChannel), c.ID, 0, 0, "", false)
 	if err != nil {
 		return err
 	}
@@ -132,7 +154,11 @@ func (c *Clan) CreateChannel(d CreateChannelData) (*api.ChannelDescription, erro
 	for _, id := range d.UserIDs {
 		userIDs = append(userIDs, atoiID(id))
 	}
-	ch, err := c.apiClient.CreateChannelDesc(c.SessionToken, &api.CreateChannelDescRequest{
+	token, err := c.validSessionToken()
+	if err != nil {
+		return nil, err
+	}
+	ch, err := c.apiClient.CreateChannelDesc(token, &api.CreateChannelDescRequest{
 		ClanId:         atoiID(c.ID),
 		ParentId:       atoiID(d.ParentID),
 		CategoryId:     atoiID(d.CategoryID),
@@ -152,7 +178,11 @@ func (c *Clan) CreateChannel(d CreateChannelData) (*api.ChannelDescription, erro
 
 // DeleteChannel deletes a channel from the clan and evicts it from the caches.
 func (c *Clan) DeleteChannel(channelID string) error {
-	if err := c.apiClient.DeleteChannelDesc(c.SessionToken, c.ID, channelID); err != nil {
+	token, err := c.validSessionToken()
+	if err != nil {
+		return err
+	}
+	if err := c.apiClient.DeleteChannelDesc(token, c.ID, channelID); err != nil {
 		return err
 	}
 	c.Channels.Delete(channelID)
@@ -162,12 +192,20 @@ func (c *Clan) DeleteChannel(channelID string) error {
 
 // ListRoles lists clan roles, port of Clan.listRoles.
 func (c *Clan) ListRoles(limit, state int32, cursor string) (*api.RoleListEventResponse, error) {
-	return c.apiClient.ListRoles(c.SessionToken, c.ID, limit, state, cursor)
+	token, err := c.validSessionToken()
+	if err != nil {
+		return nil, err
+	}
+	return c.apiClient.ListRoles(token, c.ID, limit, state, cursor)
 }
 
 // UpdateRole updates a clan role, port of Clan.updateRole.
 func (c *Clan) UpdateRole(req *api.UpdateRoleRequest) error {
-	return c.apiClient.UpdateRole(c.SessionToken, req)
+	token, err := c.validSessionToken()
+	if err != nil {
+		return err
+	}
+	return c.apiClient.UpdateRole(token, req)
 }
 
 // CreateRole creates a role in this clan and returns it. A zero req.ClanId is
@@ -176,12 +214,20 @@ func (c *Clan) CreateRole(req *api.CreateRoleRequest) (*api.Role, error) {
 	if req.ClanId == 0 {
 		req.ClanId = atoiID(c.ID)
 	}
-	return c.apiClient.CreateRole(c.SessionToken, req)
+	token, err := c.validSessionToken()
+	if err != nil {
+		return nil, err
+	}
+	return c.apiClient.CreateRole(token, req)
 }
 
 // DeleteRole deletes a role from this clan.
 func (c *Clan) DeleteRole(roleID string) error {
-	return c.apiClient.DeleteRole(c.SessionToken, roleID, c.ID)
+	token, err := c.validSessionToken()
+	if err != nil {
+		return err
+	}
+	return c.apiClient.DeleteRole(token, roleID, c.ID)
 }
 
 // UpdateChannelPrivate makes a channel private (private=true) or public.
@@ -200,7 +246,11 @@ func (c *Clan) UpdateChannelPrivate(channelID string, private bool, roleIDs, use
 	for _, id := range userIDs {
 		req.UserIds = append(req.UserIds, atoiID(id))
 	}
-	return c.apiClient.UpdateChannelPrivate(c.SessionToken, req)
+	token, err := c.validSessionToken()
+	if err != nil {
+		return err
+	}
+	return c.apiClient.UpdateChannelPrivate(token, req)
 }
 
 // AddRolesToChannel grants roles access to a private channel.
@@ -209,19 +259,31 @@ func (c *Clan) AddRolesToChannel(channelID string, roleIDs []string) error {
 	for _, id := range roleIDs {
 		req.RoleIds = append(req.RoleIds, atoiID(id))
 	}
-	return c.apiClient.AddRolesChannelDesc(c.SessionToken, req)
+	token, err := c.validSessionToken()
+	if err != nil {
+		return err
+	}
+	return c.apiClient.AddRolesChannelDesc(token, req)
 }
 
 // SetRoleChannelPermission sets per-channel permission overrides for a role
 // (req.RoleId) or a user (req.UserId).
 func (c *Clan) SetRoleChannelPermission(req *api.UpdateRoleChannelRequest) error {
-	return c.apiClient.SetRoleChannelPermission(c.SessionToken, req)
+	token, err := c.validSessionToken()
+	if err != nil {
+		return err
+	}
+	return c.apiClient.SetRoleChannelPermission(token, req)
 }
 
 // ListPermissions lists the permission definitions known to the server,
 // for mapping slugs like "send-message" to permission ids.
 func (c *Clan) ListPermissions() (*api.PermissionList, error) {
-	return c.apiClient.GetListPermission(c.SessionToken)
+	token, err := c.validSessionToken()
+	if err != nil {
+		return nil, err
+	}
+	return c.apiClient.GetListPermission(token)
 }
 
 // ListChannelVoiceUsers lists users in the clan's voice channels, port of
@@ -230,5 +292,9 @@ func (c *Clan) ListChannelVoiceUsers(limit int32) (*api.VoiceChannelUserList, er
 	if limit <= 0 || limit > 500 {
 		return nil, fmt.Errorf("0 < limit <= 500")
 	}
-	return c.apiClient.ListChannelVoiceUsers(c.SessionToken, c.ID, limit)
+	token, err := c.validSessionToken()
+	if err != nil {
+		return nil, err
+	}
+	return c.apiClient.ListChannelVoiceUsers(token, c.ID, limit)
 }

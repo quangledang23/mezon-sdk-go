@@ -73,5 +73,9 @@ func (s *DefaultSocket) dispatch(env *rtapi.Envelope) {
 		s.emit(EventUserProfileUpdated, env.UserProfileUpdatedEvent)
 	case env.ClanDeletedEvent != nil:
 		s.emit(EventClanDeleted, env.ClanDeletedEvent)
+	case env.FriendStateUpdated != nil:
+		s.emit(EventFriendStateUpdated, env.FriendStateUpdated)
+	case env.RefreshSessionEvent != nil:
+		s.emit(EventRefreshSession, env.RefreshSessionEvent)
 	}
 }

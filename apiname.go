@@ -215,6 +215,18 @@ var apiNames = []string{
 	"MarkAsRead",
 	"UploadBatchAttachmentFile",
 	"SearchCtrlK",
+	"SearchMentionUsers",
+	"GenerateCDNSignature",
+	"GetStreamPlayback",
+	"LinkCDNFile",
+	"SfuBreakoutRoom",
+	"SfuBreakoutMerge",
+	"SetOverrideEveryoneChannel",
+	"GetOverrideEveryoneChannel",
+	"GetDMSetting",
+	"UpdateDMSetting",
+	"RevokeAllSession",
+	"RedeemProPlanCoupon",
 }
 
 var apiNameIndex = func() map[string]int32 {

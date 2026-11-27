@@ -36,6 +36,16 @@ const WRAPPERS = {
   BytesValue: "bytes",
 };
 
+// Fields that need explicit presence ("Message.field"). ts-proto's decode()
+// cannot show presence, so they are listed by hand and emitted as proto3
+// `optional`, which makes protoc-gen-go generate a pointer:
+//   - GenerateMeetTokenRequest.current_endpoint_id: api.ts appends an explicit
+//     `20 00` when the caller passes current_endpoint_id 0, so "0" and "unset"
+//     differ on the wire.
+const OPTIONAL_FIELDS = new Set([
+  "GenerateMeetTokenRequest.current_endpoint_id",
+]);
+
 // ---- parsing -------------------------------------------------------------
 
 function parseEnums(src) {
@@ -273,7 +283,9 @@ function build() {
         continue;
       }
       const pt = fieldProtoType(f, m.name, ifaces, pkg);
-      const rep = f.repeated ? "repeated " : "";
+      const rep = f.repeated
+        ? "repeated "
+        : OPTIONAL_FIELDS.has(`${m.name}.${f.name}`) ? "optional " : "";
       lines.push(`  ${rep}${pt} ${f.name} = ${f.num};`);
     }
     lines.push(`}`);

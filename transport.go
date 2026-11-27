@@ -75,6 +75,9 @@ type transportConn interface {
 	readFrame() (*wireFrame, error)
 	// writeEnvelope writes a proto-marshaled rtapi.Envelope.
 	writeEnvelope(data []byte) error
+	// cidLast reports whether envelopes for this transport must be marshaled
+	// with the cid as the final field (see marshalEnvelope).
+	cidLast() bool
 	// nativePing reports whether heartbeats use a dedicated wire frame instead
 	// of an Envelope{Ping}; when true, writePing must be used.
 	nativePing() bool
@@ -128,6 +131,8 @@ func parseWSRawFrame(data []byte) (*wireFrame, bool) {
 func (w *wsConn) writeEnvelope(data []byte) error {
 	return w.conn.WriteMessage(websocket.BinaryMessage, data)
 }
+
+func (w *wsConn) cidLast() bool { return false }
 
 func (w *wsConn) nativePing() bool { return false }
 
@@ -371,15 +376,19 @@ func readAbridgedLength(r *bufio.Reader, prefix byte) (int, error) {
 func (t *tcpConn) writeEnvelope(data []byte) error {
 	// The gateway strips trailing zero bytes as abridged padding, which would
 	// corrupt a proto payload that really ends with 0x00 (e.g. an empty
-	// trailing submessage: ClanJoin{ClanId: 0} -> "1a 00"). Append a benign
-	// unknown varint field (number 2047, value 1) so the payload never ends
-	// with a zero byte; servers ignore unknown fields.
+	// trailing submessage: ClanJoin{ClanId: 0} -> "1a 00"). Envelopes with a
+	// cid are already safe because the cid is marshaled last (cidLast); for
+	// anything else, append a benign unknown varint field (number 2047, value
+	// 1) so the payload never ends with a zero byte; servers ignore unknown
+	// fields.
 	if len(data) > 0 && data[len(data)-1] == 0x00 {
 		data = append(data, 0xf8, 0x7f, 0x01)
 	}
 	_, err := t.conn.Write(encodeAbridgedFrame(data))
 	return err
 }
+
+func (t *tcpConn) cidLast() bool { return true }
 
 func (t *tcpConn) nativePing() bool { return true }
 

@@ -3,6 +3,7 @@ package mezon
 import (
 	"log"
 
+	"github.com/quangledang23/mezon-sdk-go/api"
 	"github.com/quangledang23/mezon-sdk-go/rtapi"
 )
 
@@ -41,6 +42,20 @@ func (c *MezonClient) bindInternalListeners() {
 				clan.Channels.Delete(channelID)
 			}
 		}
+	})
+	// The server can push a renewed session over the socket; adopt it so REST
+	// calls and the next reconnect use the new token.
+	c.events.on(EventRefreshSession, func(p any) {
+		sessApi, ok := p.(*api.Session)
+		if !ok || sessApi == nil || sessApi.Token == "" {
+			return
+		}
+		session, err := sessionFromProto(sessApi)
+		if err != nil {
+			log.Printf("mezon: RefreshSessionEvent carried an invalid session: %v", err)
+			return
+		}
+		c.adoptSession(session)
 	})
 }
 

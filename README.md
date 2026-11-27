@@ -39,7 +39,34 @@ Mirrors `MezonClientCore.login`:
 2. Decode the JWT for expiry/vars, and re-target host/ws from the session's
    `api_url`/`ws_url`.
 3. Open the protobuf WebSocket (`/ws?...&format=protobuf`), then join every clan
-   chat and build the clan/channel/user caches.
+   chat and build the clan/channel/user caches. The DM pseudo-clan `"0"` is
+   joined last, once the DM channels are fetched and cached.
+
+## Sessions and reconnecting
+
+A session token lives about an hour. The client renews it by itself: before a
+REST call (its own, a `Clan`'s, a cache miss) it re-authenticates the bot when
+the token is expired or within 30 seconds of expiring, and concurrent callers
+share one round trip. For calls you make yourself through `client.Api()`, take
+the token from `client.EnsureValidSession()`; `client.IsSessionExpired(buffer)`
+only reports the state.
+
+After a disconnect the client retries with backoff (5s doubling to 60s). Each
+attempt:
+
+- authenticates the bot again, so an expired or revoked token and endpoints the
+  gateway has since reassigned are replaced before dialing (mezon-sdk only
+  renews a token that has expired by the clock). If the gateway cannot be
+  reached, a session that has not expired is still tried;
+- when the dial fails, asks the login gateway for a healthy node
+  (`GET /v2/healthy/endpoint`, at most once per 15s) and moves the socket and
+  the REST client there, or renews the session when the gateway answers
+  401/403, a port of `handleReconnectSocket` in mezon-sdk v2.8.67;
+- when the node accepts the connection but the clan/channel init fails, drops
+  the connection so the next attempt dials again.
+
+The server can also push a renewed session over the socket
+(`EventRefreshSession`, payload `*api.Session`); the client adopts it by itself.
 
 ## Sending messages and UTF-16
 
@@ -74,8 +101,12 @@ All writes are serialized through an `AsyncThrottleQueue` (80/sec, like the TS S
 
 Polls (mezon-sdk v2.16): `client.CreatePoll`, `client.GetPoll`, `client.ClosePoll`
 (bots may use every poll endpoint except voting), and `client.GenerateMeetToken`
-for SFU access tokens. Other REST endpoints are reachable through `client.Api()`
-with `client.SessionToken()`.
+for SFU access tokens (`CurrentEndpointId` is optional: `nil` leaves it out,
+`proto.Int32(0)` sends an explicit zero). `client.GetStreamPlayback` returns the
+WHIP/WHEP/HLS URLs and bearer token for a stream channel, and
+`client.GenerateCDNSignature` a CDN signature for a channel. Other REST
+endpoints are reachable through `client.Api()` with the token from
+`client.EnsureValidSession()`.
 
 ## Events
 

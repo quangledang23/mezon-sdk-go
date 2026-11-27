@@ -2,6 +2,7 @@ package mezon
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/quangledang23/mezon-sdk-go/api"
 )
@@ -80,9 +81,7 @@ func channelMessageFromProto(cm *api.ChannelMessage) *ChannelMessage {
 		CreateTimeSeconds: cm.CreateTimeSeconds,
 		UpdateTimeSeconds: cm.UpdateTimeSeconds,
 	}
-	if cm.Content != "" {
-		out.Content = json.RawMessage(cm.Content)
-	}
+	out.Content = contentFromWire(cm.Content)
 	out.Mentions = decodeMentions(cm.Mentions)
 	out.Attachments = decodeAttachments(cm.Attachments)
 	out.References = decodeRefs(cm.References)
@@ -91,6 +90,26 @@ func channelMessageFromProto(cm *api.ChannelMessage) *ChannelMessage {
 		out.ReferencedMessage = json.RawMessage(cm.ReferencedMessage)
 	}
 	return out
+}
+
+// contentFromWire turns the content string of an inbound message into JSON,
+// port of the guard in safeJSONParse (mezon-sdk v2.8.65): content that is not
+// a JSON object or array (plain text, or the empty array some senders use
+// for "no content") is wrapped as {"t": <raw>} instead of being passed
+// through as invalid JSON. Empty content stays nil.
+func contentFromWire(raw string) json.RawMessage {
+	if raw == "" {
+		return nil
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "[]" || (trimmed[0] != '{' && trimmed[0] != '[') {
+		wrapped, err := json.Marshal(map[string]string{"t": raw})
+		if err != nil {
+			return nil
+		}
+		return wrapped
+	}
+	return json.RawMessage(raw)
 }
 
 // looksLikeJSON reports whether the blob starts with '[' or '{', the same

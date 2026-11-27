@@ -143,6 +143,10 @@ type socketResponse struct {
 // rtapi.Envelope frames over a transportConn (abridged TCP by default,
 // WebSocket opt-in) and correlates request/response pairs by cid.
 type DefaultSocket struct {
+	// epMu guards the endpoint fields (wsURL, host, port, useSSL, TcpURL) once
+	// the socket is in use: UpdateEndpoint may move them while a reconnect is
+	// dialing.
+	epMu    sync.RWMutex
 	wsURL   string
 	host    string
 	port    string
@@ -209,6 +213,37 @@ func NewDefaultSocket(wsURL, host, port string, useSSL bool, emit func(string, a
 // IsOpen reports whether the socket is connected.
 func (s *DefaultSocket) IsOpen() bool { return s.connected.Load() }
 
+// UpdateEndpoint points future Connect calls at another gateway node, port of
+// SocketManager.updateEndpoint (mezon-sdk v2.8.67). An empty wsURL or tcpURL
+// keeps the current value. It reports whether the address the configured
+// transport dials actually changed, and never touches a live connection: the
+// new endpoint takes effect on the next Connect.
+func (s *DefaultSocket) UpdateEndpoint(wsURL, host, port string, useSSL bool, tcpURL string) bool {
+	s.epMu.Lock()
+	defer s.epMu.Unlock()
+	before := s.dialTarget()
+	if wsURL != "" {
+		s.wsURL = wsURL
+	}
+	if tcpURL != "" {
+		s.TcpURL = tcpURL
+	}
+	if host != "" {
+		s.host, s.port, s.useSSL = host, port, useSSL
+	}
+	return s.dialTarget() != before
+}
+
+// dialTarget identifies the address the configured transport dials. Callers
+// hold epMu.
+func (s *DefaultSocket) dialTarget() string {
+	if s.Transport == TransportWebSocket {
+		return s.buildURL("", false)
+	}
+	host, port := s.tcpAddr()
+	return net.JoinHostPort(host, port) + "|" + strconv.FormatBool(s.useSSL)
+}
+
 func (s *DefaultSocket) buildURL(token string, createStatus bool) string {
 	scheme := "ws"
 	if s.useSSL {
@@ -263,16 +298,20 @@ func (s *DefaultSocket) logf(format string, args ...any) {
 
 // dial establishes the wire connection for the configured transport.
 func (s *DefaultSocket) dial(token string, createStatus bool) (transportConn, error) {
+	s.epMu.RLock()
+	wsURL := s.buildURL(token, createStatus)
+	host, port := s.tcpAddr()
+	useSSL := s.useSSL
+	s.epMu.RUnlock()
 	if s.Transport == TransportWebSocket {
 		dialer := websocket.Dialer{HandshakeTimeout: defaultConnectTimeout}
-		conn, _, err := dialer.Dial(s.buildURL(token, createStatus), nil)
+		conn, _, err := dialer.Dial(wsURL, nil)
 		if err != nil {
 			return nil, err
 		}
 		return &wsConn{conn: conn, logf: s.logf}, nil
 	}
-	host, port := s.tcpAddr()
-	return dialTCP(host, port, s.useSSL, s.TLSInsecureSkipVerify, token)
+	return dialTCP(host, port, useSSL, s.TLSInsecureSkipVerify, token)
 }
 
 // Connect establishes the connection using the session token.
@@ -489,12 +528,7 @@ func (s *DefaultSocket) sendResponse(env *rtapi.Envelope, timeout time.Duration)
 	}
 	s.cidMu.Unlock()
 
-	data, err := proto.Marshal(env)
-	if err != nil {
-		s.clearCid(cid)
-		return nil, err
-	}
-
+	var err error
 	s.writeMu.Lock()
 	conn, done := s.conn, s.done
 	if env.Ping != nil && conn.nativePing() {
@@ -502,7 +536,10 @@ func (s *DefaultSocket) sendResponse(env *rtapi.Envelope, timeout time.Duration)
 		// pong comes back as framePong and resolves this cid.
 		err = conn.writePing(cid)
 	} else {
-		err = conn.writeEnvelope(data)
+		var data []byte
+		if data, err = marshalEnvelope(env, conn.cidLast()); err == nil {
+			err = conn.writeEnvelope(data)
+		}
 	}
 	s.writeMu.Unlock()
 	if err != nil {
@@ -525,6 +562,31 @@ func (s *DefaultSocket) sendResponse(env *rtapi.Envelope, timeout time.Duration)
 	case <-done:
 		return nil, ErrSocketClosed
 	}
+}
+
+// envelopeCidField is the field number of Envelope.cid.
+const envelopeCidField = 1
+
+// marshalEnvelope encodes an outbound envelope. With cidLast the cid is
+// written as the final field instead of the first, port of
+// encodeEnvelopeCidLast (mezon-js PR #1190): the gateway strips every trailing
+// zero byte of an abridged frame as padding, which eats the real last byte of
+// a request ending in 0x00 (e.g. an empty repeated field, "42 00") and leaves
+// the call unanswered. A cid is 1..65535, whose varint never ends in 0x00, so
+// a frame that ends with the cid is immune.
+func marshalEnvelope(env *rtapi.Envelope, cidLast bool) ([]byte, error) {
+	cid := env.Cid
+	if !cidLast || cid <= 0 {
+		return proto.Marshal(env)
+	}
+	env.Cid = 0
+	data, err := proto.Marshal(env)
+	env.Cid = cid
+	if err != nil {
+		return nil, err
+	}
+	data = protowire.AppendTag(data, envelopeCidField, protowire.VarintType)
+	return protowire.AppendVarint(data, uint64(cid)), nil
 }
 
 func (s *DefaultSocket) clearCid(cid int32) {
@@ -554,6 +616,9 @@ func (s *DefaultSocket) readLoop(conn transportConn, events chan<- *rtapi.Envelo
 		f, err := conn.readFrame()
 		if err != nil {
 			s.markDisconnected(done, err.Error())
+			// The connection is dead either way; release it now instead of
+			// leaving it open until the next Connect or Close.
+			_ = conn.close()
 			return
 		}
 		switch f.kind {

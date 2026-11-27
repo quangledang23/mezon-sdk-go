@@ -119,6 +119,17 @@ message Envelope {
   TopicInMessageEvent topic_in_message_event = 98;
   ScreenShareEvent screen_share_event = 99;
   VoiceInteractiveEvent voice_interactive_event = 100;
+  MetricMessageEvent metric_message_event = 101;
+  StreamingWatch streaming_watch = 104;
+  SfuBreakoutRoomEvent sfu_breakout_room_event = 105;
+  StreamingViewerCountEvent streaming_viewer_count_event = 106;
+  FriendStateUpdated friend_state_updated = 107;
+}
+
+message SfuBreakoutRoomEvent {
+  int64 channel_id = 1;
+  string token = 2;
+  repeated int64 self_select_ids = 3;
 }
 
 message VoiceInteractiveEvent {
@@ -148,6 +159,7 @@ message ApiRequestEvent {
   int32 api_index = 1;
   string api_name = 2;
   bytes body = 3;
+  int32 region = 4;
 }
 
 message FollowEvent {
@@ -385,6 +397,7 @@ message AddFriend {
   string username = 2;
   string display_name = 3;
   string avatar = 4;
+  bool accepted = 5;
 }
 
 message RemoveFriend {
@@ -508,6 +521,7 @@ message StreamingJoinedEvent {
   int64 user_id = 5;
   string streaming_channel_label = 6;
   int64 streaming_channel_id = 7;
+  bool is_publisher = 8;
 }
 
 message StreamingStartedEvent {
@@ -520,6 +534,17 @@ message StreamingStartedEvent {
 message StreamingEndedEvent {
   int64 clan_id = 1;
   int64 channel_id = 2;
+}
+
+message StreamingViewerCountEvent {
+  int64 clan_id = 1;
+  int64 channel_id = 2;
+  int32 viewer_count = 3;
+}
+
+message StreamingWatch {
+  int64 channel_id = 1;
+  bool watching = 2;
 }
 
 message ChannelCreatedEvent {
@@ -729,6 +754,7 @@ message ClanUpdatedEvent {
   bool prevent_anonymous = 13;
   string hashtags = 14;
   string short_url = 15;
+  bool pro_plan = 16;
 }
 
 message ClanProfileUpdatedEvent {
@@ -746,6 +772,8 @@ message UserProfileUpdatedEvent {
   int64 channel_id = 5;
   int64 clan_id = 6;
   string encrypt_private_key = 7;
+  string banner = 8;
+  bool pro_plan = 9;
 }
 
 message ConfirmLinkMezonOTPData {
@@ -774,6 +802,24 @@ message FCMTokens {
   string device_id = 1;
   string token_id = 2;
   string platform = 3;
+}
+
+message StreamingNode {
+  string id = 1;
+  string role = 2;
+  string url = 3;
+  bool hls = 4;
+  int64 sessions = 5;
+  int64 max_sessions = 6;
+  int64 ts = 7;
+  int64 boot = 8;
+  int64 seen_ms = 9;
+  bool down = 10;
+}
+
+message StreamingLive {
+  string node = 1;
+  int64 ts = 2;
 }
 
 message CheckNameExistedEvent {
@@ -965,4 +1011,30 @@ message GotifyMessage {
   map<string, string> extras = 8;
   uint32 app_id = 9;
   int64 sender_id = 10;
+}
+
+message BreakoutSession {
+  int64 breakout_id = 1;
+  int64 parent_channel_id = 2;
+  int64 clan_id = 3;
+  int32 room_count = 4;
+  int32 break_rule_type = 5;
+  repeated int64 list_child_rooms = 6;
+  int64 creator_id = 7;
+}
+
+message MetricMessageEvent {
+  string request_id = 1;
+  int32 sessions_active = 2;
+  int32 sessions_peak = 3;
+  int64 sessions_created_total = 4;
+  int64 sessions_closed_total = 5;
+}
+
+message FriendStateUpdated {
+  int64 user_id = 1;
+  string username = 2;
+  string display_name = 3;
+  string avatar = 4;
+  int32 state = 5;
 }

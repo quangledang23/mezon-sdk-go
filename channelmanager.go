@@ -52,9 +52,14 @@ func (m *ChannelManager) CreateDMChannel(userID string) (*api.ChannelDescription
 	if !IsValidUserID(userID) {
 		return nil, ErrNotFound
 	}
-	session := m.client.session
-	if session == nil {
+	// Renew the session first when it is about to expire, port of the
+	// ensureValidSession hook in createDMchannel (mezon-sdk v2.8.65).
+	if m.client.currentSession() == nil {
 		return nil, ErrNotFound
+	}
+	session, err := m.client.ensureValidSession(sessionExpiryBuffer, false)
+	if err != nil {
+		return nil, err
 	}
 	req := &api.CreateChannelDescRequest{
 		ClanId:         0,

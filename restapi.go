@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/quangledang23/mezon-sdk-go/api"
@@ -24,10 +25,14 @@ func protoUnmarshal(b []byte, m proto.Message) error { return proto.Unmarshal(b,
 // posted to the /mezon.api.Mezon/<Method> endpoints, except authentication
 // which posts JSON.
 type MezonApi struct {
-	APIKey   string
+	APIKey string
+	// BasePath is the scheme://host:port the HTTP requests go to. Change it
+	// with SetBasePath once the client is in use: a reconnect may move the
+	// client to another gateway node while requests are in flight.
 	BasePath string
 	Timeout  time.Duration
 	client   *http.Client
+	baseMu   sync.RWMutex
 
 	// socket, when set and open, carries the /mezon.api.Mezon/ requests as
 	// ApiRequestEvent frames over the realtime connection instead of HTTP (port
@@ -47,6 +52,85 @@ func NewMezonApi(apiKey, basePath string, timeout time.Duration) *MezonApi {
 		Timeout:  timeout,
 		client:   &http.Client{Timeout: timeout},
 	}
+}
+
+// SetBasePath points the client at another API node, port of
+// MezonApi.setBasePath. Safe to call while requests are in flight.
+func (a *MezonApi) SetBasePath(basePath string) {
+	a.baseMu.Lock()
+	a.BasePath = basePath
+	a.baseMu.Unlock()
+}
+
+func (a *MezonApi) basePath() string {
+	a.baseMu.RLock()
+	defer a.baseMu.RUnlock()
+	return a.BasePath
+}
+
+// HealthyEndpoint is the gateway's answer to GetHealthyEndpoint: the node a
+// session should talk to. Fields the gateway leaves out are empty.
+type HealthyEndpoint struct {
+	APIURL    string     `json:"api_url"`
+	WsURL     string     `json:"ws_url"`
+	TcpURL    string     `json:"tcp_url"`
+	SessionID string     `json:"session_id"`
+	UserID    flexString `json:"user_id"`
+}
+
+// flexString decodes a JSON string or a bare number into a string, so an id
+// the gateway serializes as a number does not fail the whole payload.
+type flexString string
+
+func (f *flexString) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] == '"' {
+		var v string
+		if err := json.Unmarshal(b, &v); err != nil {
+			return err
+		}
+		*f = flexString(v)
+		return nil
+	}
+	if string(b) != "null" {
+		*f = flexString(b)
+	}
+	return nil
+}
+
+// GetHealthyEndpoint asks the gateway for a healthy node for the session,
+// port of getHealthyEndpoint (mezon-sdk v2.8.67). credential is the session id,
+// or the session token on servers that issue no session id. Call it on a
+// client whose BasePath is the login gateway, not a node.
+//
+// status is the HTTP status, 0 with a non-nil error when the gateway could
+// not be reached. The payload is nil unless the gateway answered 2xx with a
+// decodable body; a 401/403 status means the session is no longer accepted.
+func (a *MezonApi) GetHealthyEndpoint(credential string) (payload *HealthyEndpoint, status int, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), a.Timeout)
+	defer cancel()
+	url := strings.TrimRight(a.basePath(), "/") + "/v2/healthy/endpoint"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+credential)
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode > 299 {
+		return nil, res.StatusCode, nil
+	}
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, res.StatusCode, nil
+	}
+	out := &HealthyEndpoint{}
+	if json.Unmarshal(data, out) != nil {
+		return nil, res.StatusCode, nil
+	}
+	return out, res.StatusCode, nil
 }
 
 // doProto sends a protobuf request to path and decodes the protobuf response,
@@ -82,7 +166,7 @@ func (a *MezonApi) doRaw(bearer, path string, req proto.Message) ([]byte, error)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), a.Timeout)
 	defer cancel()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.BasePath+path, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.basePath()+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +237,7 @@ func (a *MezonApi) MezonAuthenticate(botID, apiKey string) (*api.Session, error)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), a.Timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.BasePath+"/v2/apps/authenticate/token", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.basePath()+"/v2/apps/authenticate/token", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -335,6 +419,8 @@ func (a *MezonApi) AddQuickMenuAccess(bearer string, req *api.QuickMenuAccess) e
 }
 
 // ListQuickMenuAccess lists quick-menu entries, port of listQuickMenuAccess.
+//
+// Deprecated: the server rejects this call with 403 for bot sessions.
 func (a *MezonApi) ListQuickMenuAccess(bearer, botID, channelID string, menuType int32) (*api.QuickMenuAccessList, error) {
 	req := &api.ListQuickMenuAccessRequest{BotId: atoiID(botID), ChannelId: atoiID(channelID), MenuType: menuType}
 	resp := &api.QuickMenuAccessList{}
@@ -382,6 +468,10 @@ func (a *MezonApi) GetPoll(bearer, pollID, messageID, channelID string) (*api.Ge
 // GenerateMeetTokenResponse proto or, on older deployments, with the bare JWT
 // text; both shapes are normalized into the response struct
 // (decodeGenerateMeetTokenResponse in api.ts).
+//
+// req.CurrentEndpointId is optional: nil leaves it off the wire, while a
+// pointer to 0 sends an explicit zero (the server tells the two apart), port
+// of the explicit `current_endpoint_id === 0` write in mezon-sdk v2.8.66.
 func (a *MezonApi) GenerateMeetToken(bearer string, req *api.GenerateMeetTokenRequest) (*api.GenerateMeetTokenResponse, error) {
 	if req == nil {
 		return nil, fmt.Errorf("mezon: GenerateMeetToken requires a request body")
@@ -408,6 +498,35 @@ func decodeGenerateMeetTokenResponse(data []byte) *api.GenerateMeetTokenResponse
 		}
 	}
 	return &api.GenerateMeetTokenResponse{Token: string(body)}
+}
+
+// GetStreamPlayback returns where to publish to (req.Publish) or watch a
+// stream channel served by mezon-streaming-server, port of getStreamPlayback
+// (mezon-sdk v2.8.63): the WHIP/WHEP/HLS URLs, the bearer token for them and
+// its expiry. The server answers 403 when the bot is not a member of the
+// channel.
+func (a *MezonApi) GetStreamPlayback(bearer string, req *api.GetStreamPlaybackRequest) (*api.GetStreamPlaybackResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("mezon: GetStreamPlayback requires a request body")
+	}
+	resp := &api.GetStreamPlaybackResponse{}
+	if err := a.doProto(bearer, "/mezon.api.Mezon/GetStreamPlayback", req, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// GenerateCDNSignature generates a CDN signature for a channel, port of
+// generateCDNSignature (mezon-sdk v2.8.64).
+func (a *MezonApi) GenerateCDNSignature(bearer string, req *api.GenerateCDNSignatureRequest) (*api.GenerateCDNSignatureResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("mezon: GenerateCDNSignature requires a request body")
+	}
+	resp := &api.GenerateCDNSignatureResponse{}
+	if err := a.doProto(bearer, "/mezon.api.Mezon/GenerateCDNSignature", req, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // PlayMedia posts a play-media request to the streaming server, port of playMedia.

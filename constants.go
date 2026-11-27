@@ -87,5 +87,7 @@ const (
 	EventClanProfileUpdated  = "clan_profile_updated_event"
 	EventUserProfileUpdated  = "user_profile_updated_event"
 	EventClanDeleted         = "clan_deleted_event"
+	EventFriendStateUpdated  = "friend_state_updated"
+	EventRefreshSession      = "refresh_session_event"
 	EventReady               = "ready"
 )

@@ -86,7 +86,7 @@ type userDTO struct {
 // land here, which consult the shared L2 store, then fall back to the REST API
 // and populate L2.
 func (c *MezonClient) fetchChannel(id string) (*TextChannel, error) {
-	if c.session == nil {
+	if c.currentSession() == nil {
 		return nil, ErrNotFound
 	}
 	if b, ok := c.l2Get(l2ChannelPrefix + id); ok {
@@ -95,7 +95,11 @@ func (c *MezonClient) fetchChannel(id string) (*TextChannel, error) {
 			return c.buildChannel(&detail), nil
 		}
 	}
-	detail, err := c.apiClient.ListChannelDetail(c.session.Token, id)
+	session, err := c.ensureValidSession(sessionExpiryBuffer, false)
+	if err != nil {
+		return nil, err
+	}
+	detail, err := c.apiClient.ListChannelDetail(session.Token, id)
 	if err != nil {
 		return nil, err
 	}
@@ -137,11 +141,7 @@ func (c *MezonClient) buildChannel(detail *api.ChannelDescription) *TextChannel 
 	clanID := itoaID(detail.ClanId)
 	clan, ok := c.Clans.Get(clanID)
 	if !ok || clan == nil {
-		token := ""
-		if c.session != nil {
-			token = c.session.Token
-		}
-		clan = newClan(clanID, "unknown", "", "", c, token)
+		clan = newClan(clanID, "unknown", "", "", c, c.SessionToken())
 		c.Clans.Set(clanID, clan)
 	}
 	return c.upsertChannel(clan, detail)
@@ -172,7 +172,7 @@ func (c *MezonClient) upsertChannel(clan *Clan, desc *api.ChannelDescription) *T
 // fetchUser loads a user: consult L2, then create/lookup the DM channel via REST
 // and populate L2.
 func (c *MezonClient) fetchUser(id string) (*User, error) {
-	if c.session == nil {
+	if c.currentSession() == nil {
 		return nil, ErrNotFound
 	}
 	if b, ok := c.l2Get(l2UserPrefix + id); ok {

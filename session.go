@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/quangledang23/mezon-sdk-go/api"
 )
 
 // Session is a user session authenticated with the Mezon server. It mirrors
@@ -26,6 +28,10 @@ type Session struct {
 	// server (Session.tcp_url, "abriged url"). Empty on older servers; the
 	// TCP transport then falls back to WsURL / host:port.
 	TcpURL string `json:"tcp_url"`
+	// SessionID is the gateway session id (Session.session_id). It is the
+	// preferred credential for the healthy-endpoint lookup on reconnect (see
+	// MezonApi.GetHealthyEndpoint); empty on servers that do not issue one.
+	SessionID string `json:"session_id"`
 }
 
 type apiSessionRaw struct {
@@ -72,6 +78,18 @@ func (s *Session) update(token, refreshToken string) error {
 	s.ExpiresAt = exp
 	s.Vars = vars
 	return nil
+}
+
+// sessionFromProto builds a Session from an authenticate response, port of the
+// Session constructor fed with the decoded api.Session.
+func sessionFromProto(p *api.Session) (*Session, error) {
+	s, err := NewSession(p.Token, p.RefreshToken, itoaID(p.UserId), p.ApiUrl, p.IdToken, p.WsUrl)
+	if err != nil {
+		return nil, err
+	}
+	s.TcpURL = p.TcpUrl
+	s.SessionID = p.SessionId
+	return s, nil
 }
 
 // IsExpired reports whether the session token has expired at the given unix time.
